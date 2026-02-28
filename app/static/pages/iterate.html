@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Iterate — Alexandria Cover Designer</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+
+<!-- ─── Header ─────────────────────────────────────────────────────────────── -->
+<header class="app-header">
+  <a class="logo" href="/">
+    <svg width="22" height="22" viewBox="0 0 22 22" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <rect x="2" y="2" width="18" height="18" rx="3" stroke="currentColor" stroke-width="1.5"/>
+      <path d="M6 16L9 8l3 5 2-3 2 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+    Alexandria
+    <span>Cover Designer</span>
+  </a>
+
+  <div class="header-right">
+    <div class="cost-badge">
+      <span>Today: <strong id="cost-today">—</strong></span>
+      <span>Session: <strong id="cost-session">$0.000</strong></span>
+    </div>
+  </div>
+</header>
+
+<!-- ─── Main layout ──────────────────────────────────────────────────────────── -->
+<div class="page-layout">
+
+  <!-- ─── Left panel ────────────────────────────────────────────────────────── -->
+  <aside class="left-panel">
+
+    <!-- Mode toggle -->
+    <div class="panel-section" style="border-bottom: none; padding-bottom: 8px;">
+      <div class="mode-toggle">
+        <button class="mode-btn active" data-mode="quick">Quick</button>
+        <button class="mode-btn" data-mode="advanced">Advanced</button>
+      </div>
+    </div>
+
+    <!-- Book selector -->
+    <div class="panel-section">
+      <h3>Book</h3>
+      <div class="form-group">
+        <select id="book-select" aria-label="Select book">
+          <option value="">Loading books…</option>
+        </select>
+      </div>
+      <div class="sync-status">
+        <div class="sync-dot syncing" id="sync-dot"></div>
+        <span id="sync-text">Connecting…</span>
+      </div>
+    </div>
+
+    <!-- Models -->
+    <div class="panel-section">
+      <h3>Models</h3>
+      <div id="models-container" class="checkbox-group">
+        <!-- Rendered by iterate.js -->
+        <div class="text-muted" style="font-size:0.8rem;">Loading…</div>
+      </div>
+    </div>
+
+    <!-- Variants (Advanced only) -->
+    <div class="panel-section hidden" id="variant-section">
+      <h3>Variants</h3>
+      <p class="text-muted" style="font-size:0.75rem;margin-bottom:10px;">
+        1–3: Sketch/Engraving &nbsp; 4: Oil Painting &nbsp; 5: Watercolor
+      </p>
+      <div class="variant-grid">
+        <button class="variant-btn selected" data-variant="1">1</button>
+        <button class="variant-btn selected" data-variant="2">2</button>
+        <button class="variant-btn selected" data-variant="3">3</button>
+        <button class="variant-btn" data-variant="4">4</button>
+        <button class="variant-btn" data-variant="5">5</button>
+      </div>
+    </div>
+
+    <!-- Prompt editor (Advanced only) -->
+    <div class="panel-section hidden" id="prompt-section">
+      <h3>Custom Prompt</h3>
+      <p class="text-muted" style="font-size:0.75rem;margin-bottom:8px;">
+        Leave blank to use auto-generated prompts.
+      </p>
+      <textarea id="prompt-editor" placeholder="Optional: override the generation prompt for all variants…" rows="5"></textarea>
+    </div>
+
+    <!-- Generate button -->
+    <div class="panel-section" style="border-top: 1px solid var(--border); margin-top: auto;">
+      <button id="generate-btn" class="btn btn-primary">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+          <path d="M8 2v12M2 8h12" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+        </svg>
+        Generate
+      </button>
+    </div>
+
+  </aside>
+
+  <!-- ─── Right panel ───────────────────────────────────────────────────────── -->
+  <main class="right-panel" id="right-panel">
+
+    <!-- Active jobs -->
+    <div id="active-jobs-panel" class="active-jobs-strip hidden">
+      <h4>In Progress</h4>
+      <div id="active-jobs-list"></div>
+    </div>
+
+    <!-- Results header -->
+    <div class="results-header">
+      <h2>Generated Covers</h2>
+      <span class="results-count" id="results-count"></span>
+    </div>
+
+    <!-- Results grid -->
+    <div class="results-grid" id="results-grid">
+      <!-- Empty state -->
+      <div class="empty-state">
+        <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
+          <rect x="8" y="8" width="32" height="32" rx="6" stroke="#9a9490" stroke-width="2"/>
+          <path d="M16 32l7-10 5 7 4-5 8 8" stroke="#9a9490" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          <circle cx="18" cy="18" r="3" fill="#9a9490"/>
+        </svg>
+        <p>Select a book and click Generate to create AI illustrations for the cover medallion.</p>
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<script src="/static/js/common.js"></script>
+<script src="/static/js/iterate.js"></script>
+</body>
+</html>
