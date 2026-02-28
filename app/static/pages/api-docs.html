@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>API Docs — Alexandria Cover Designer</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+<header class="app-header">
+  <a class="logo" href="/"><svg width="22" height="22" viewBox="0 0 22 22" fill="none"><rect x="2" y="2" width="18" height="18" rx="3" stroke="currentColor" stroke-width="1.5"/><path d="M6 16L9 8l3 5 2-3 2 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>Alexandria <span>Cover Designer</span></a>
+  <div class="header-right"><div class="cost-badge"><span>Today: <strong id="cost-today">—</strong></span></div></div>
+</header>
+<nav class="app-nav"><ul class="nav-list">
+  <li><a href="/iterate">Iterate</a></li>
+  <li><a href="/review">Review</a></li>
+  <li><a href="/batch">Batch</a></li>
+  <li><a href="/history">History</a></li>
+  <li><a href="/dashboard">Dashboard</a></li>
+  <li><a href="/prompts">Prompts</a></li>
+  <li><a href="/jobs">Jobs</a></li>
+  <li><a href="/compare">Compare</a></li>
+  <li><a href="/analytics">Analytics</a></li>
+  <li><a href="/similarity">Similarity</a></li>
+  <li><a href="/mockups">Mockups</a></li>
+  <li><a href="/catalogs">Catalogs</a></li>
+  <li><a href="/settings">Settings</a></li>
+  <li><a href="/api-docs" class="active">API Docs</a></li>
+</ul></nav>
+
+<div class="page-content">
+  <div class="page-header">
+    <div>
+      <h1>API Documentation</h1>
+      <p class="page-header-sub">All REST endpoints — auto-generated from the router</p>
+    </div>
+    <div class="page-actions">
+      <a href="/docs" target="_blank" class="btn btn-ghost btn-sm">OpenAPI (Swagger) ↗</a>
+      <a href="/redoc" target="_blank" class="btn btn-ghost btn-sm">ReDoc ↗</a>
+      <button class="btn btn-ghost btn-sm" id="refresh-btn">↻ Refresh</button>
+    </div>
+  </div>
+
+  <!-- Search -->
+  <div class="filter-bar" style="margin-bottom:16px;">
+    <div class="filter-group">
+      <label>Search</label>
+      <input type="search" id="endpoint-search" placeholder="Filter endpoints…" style="width:240px;">
+    </div>
+    <div class="filter-group">
+      <label>Method</label>
+      <select id="method-filter">
+        <option value="">All</option>
+        <option value="GET">GET</option>
+        <option value="POST">POST</option>
+        <option value="PUT">PUT</option>
+        <option value="DELETE">DELETE</option>
+      </select>
+    </div>
+    <div class="filter-group">
+      <label>Group</label>
+      <select id="group-filter">
+        <option value="">All</option>
+        <option value="/api/books">Books</option>
+        <option value="/api/jobs">Jobs</option>
+        <option value="/api/analytics">Analytics</option>
+        <option value="/api/batch">Batch</option>
+        <option value="/api/prompts">Prompts</option>
+        <option value="/api/history">History</option>
+        <option value="/api/settings">Settings</option>
+      </select>
+    </div>
+  </div>
+
+  <!-- Overview -->
+  <div style="margin-bottom:18px; padding:14px 18px; background:var(--white); border:1px solid var(--border); border-radius:var(--radius); font-size:0.8125rem;">
+    <strong style="color:var(--navy);">Base URL:</strong> <code style="font-family:monospace; background:var(--surface); padding:2px 6px; border-radius:3px;">/api</code>
+    &nbsp; | &nbsp;
+    <strong style="color:var(--navy);">Format:</strong> JSON
+    &nbsp; | &nbsp;
+    <strong style="color:var(--navy);">Auth:</strong> None (local)
+    &nbsp; | &nbsp;
+    <span id="endpoint-count" style="color:var(--text-muted);">Loading endpoints…</span>
+  </div>
+
+  <!-- Endpoint list -->
+  <div id="endpoints-container">
+    <div style="color:var(--text-muted); text-align:center; padding:40px; font-size:0.875rem;">Loading API endpoints…</div>
+  </div>
+</div>
+
+<script src="/static/js/common.js"></script>
+<script src="/static/js/api-docs.js"></script>
+</body>
+</html>

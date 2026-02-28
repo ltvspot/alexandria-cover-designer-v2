@@ -1,6 +1,7 @@
 """
 SQLite database setup using aiosqlite + raw SQL.
-Tables: books, jobs, cost_ledger, medallion_config
+Tables: books, jobs, cost_ledger, medallion_config,
+        winner_selections, prompts, prompt_versions, batch_jobs, similarity_cache
 """
 import json
 import logging
@@ -27,6 +28,9 @@ CREATE TABLE IF NOT EXISTS books (
     cover_jpg_id TEXT,                 -- drive file id for the .jpg
     cover_cached_path TEXT,            -- local cache path
     thumbnail_path TEXT,               -- local thumbnail path
+    genre       TEXT,
+    themes      TEXT,
+    era         TEXT,
     synced_at   TEXT,
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -55,6 +59,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     composited_image_path TEXT,
     quality_score REAL,
     results_json TEXT,
+    batch_id    TEXT,
     FOREIGN KEY (book_id) REFERENCES books(id)
 );
 
@@ -70,21 +75,123 @@ CREATE TABLE IF NOT EXISTS cost_ledger (
     recorded_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS winner_selections (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    book_id     TEXT NOT NULL,
+    job_id      TEXT NOT NULL,
+    variant_index INTEGER NOT NULL DEFAULT 1,
+    quality_score REAL,
+    selected_at TEXT NOT NULL DEFAULT (datetime('now')),
+    auto_approved INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY (book_id) REFERENCES books(id),
+    FOREIGN KEY (job_id) REFERENCES jobs(id)
+);
+
+CREATE TABLE IF NOT EXISTS prompts (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL,
+    category    TEXT NOT NULL DEFAULT 'general',
+    template    TEXT NOT NULL,
+    negative_prompt TEXT,
+    style_profile TEXT,
+    usage_count INTEGER NOT NULL DEFAULT 0,
+    avg_quality REAL,
+    win_rate    REAL,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS prompt_versions (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    prompt_id   INTEGER NOT NULL,
+    version     INTEGER NOT NULL DEFAULT 1,
+    template    TEXT NOT NULL,
+    negative_prompt TEXT,
+    style_profile TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (prompt_id) REFERENCES prompts(id)
+);
+
+CREATE TABLE IF NOT EXISTS batch_jobs (
+    id          TEXT PRIMARY KEY,
+    name        TEXT,
+    status      TEXT NOT NULL DEFAULT 'queued',   -- queued|running|paused|completed|failed|cancelled
+    book_ids    TEXT NOT NULL,           -- JSON array
+    model       TEXT NOT NULL,
+    variant_count INTEGER NOT NULL DEFAULT 3,
+    prompt_strategy TEXT NOT NULL DEFAULT 'auto',
+    total_books INTEGER NOT NULL DEFAULT 0,
+    completed_books INTEGER NOT NULL DEFAULT 0,
+    failed_books INTEGER NOT NULL DEFAULT 0,
+    total_cost  REAL NOT NULL DEFAULT 0.0,
+    estimated_cost REAL,
+    current_book_id TEXT,
+    job_ids     TEXT,                   -- JSON array of generated job ids
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    started_at  TEXT,
+    completed_at TEXT,
+    paused_at   TEXT,
+    error       TEXT
+);
+
+CREATE TABLE IF NOT EXISTS similarity_cache (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id_a    TEXT NOT NULL,
+    job_id_b    TEXT NOT NULL,
+    score       REAL NOT NULL,
+    computed_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(job_id_a, job_id_b)
+);
+
+CREATE TABLE IF NOT EXISTS settings (
+    key         TEXT PRIMARY KEY,
+    value       TEXT NOT NULL,
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_jobs_book_id   ON jobs(book_id);
 CREATE INDEX IF NOT EXISTS idx_jobs_status    ON jobs(status);
 CREATE INDEX IF NOT EXISTS idx_jobs_created   ON jobs(created_at);
+CREATE INDEX IF NOT EXISTS idx_jobs_batch     ON jobs(batch_id);
 CREATE INDEX IF NOT EXISTS idx_ledger_job     ON cost_ledger(job_id);
 CREATE INDEX IF NOT EXISTS idx_ledger_date    ON cost_ledger(recorded_at);
+CREATE INDEX IF NOT EXISTS idx_winner_book    ON winner_selections(book_id);
+CREATE INDEX IF NOT EXISTS idx_prompt_cat     ON prompts(category);
+CREATE INDEX IF NOT EXISTS idx_batch_status   ON batch_jobs(status);
 """
+
+# Migration to add new columns if they don't exist
+MIGRATIONS = [
+    "ALTER TABLE books ADD COLUMN genre TEXT",
+    "ALTER TABLE books ADD COLUMN themes TEXT",
+    "ALTER TABLE books ADD COLUMN era TEXT",
+    "ALTER TABLE jobs ADD COLUMN batch_id TEXT",
+]
 
 
 # ─── Init ─────────────────────────────────────────────────────────────────────
 async def init_db() -> None:
-    """Create tables if they don't exist."""
+    """Create tables if they don't exist, run migrations."""
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.executescript(SCHEMA)
-        await db.commit()
+        # Run migrations first (add new columns to existing tables)
+        for migration in MIGRATIONS:
+            try:
+                await db.execute(migration)
+                await db.commit()
+            except Exception:
+                pass  # Column already exists or table doesn't exist yet
+
+        # Run each DDL statement individually so errors don't block others
+        for stmt in SCHEMA.split(";"):
+            stmt = stmt.strip()
+            if stmt:
+                try:
+                    await db.execute(stmt)
+                    await db.commit()
+                except Exception as e:
+                    # Log but continue — table/index may already exist with right schema
+                    pass
     logger.info("Database initialised at %s", DB_PATH)
 
 
@@ -159,8 +266,8 @@ async def create_job(job: Dict[str, Any]) -> str:
     job_id = job.get("id") or str(uuid.uuid4())
     await execute(
         """
-        INSERT INTO jobs (id, book_id, status, model, variant, prompt, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO jobs (id, book_id, status, model, variant, prompt, created_at, batch_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             job_id,
@@ -170,6 +277,7 @@ async def create_job(job: Dict[str, Any]) -> str:
             job.get("variant", 1),
             job.get("prompt"),
             datetime.now(UTC).isoformat(),
+            job.get("batch_id"),
         ),
     )
     return job_id
@@ -253,3 +361,162 @@ async def get_monthly_cost() -> float:
         (month,),
     )
     return rows[0]["total"] or 0.0 if rows else 0.0
+
+
+# ─── Winner selections ────────────────────────────────────────────────────────
+async def save_winner(book_id: str, job_id: str, variant_index: int = 1,
+                       quality_score: float = None, auto_approved: bool = False) -> None:
+    # Remove any existing selection for this book
+    await execute("DELETE FROM winner_selections WHERE book_id = ?", (book_id,))
+    await execute(
+        """
+        INSERT INTO winner_selections (book_id, job_id, variant_index, quality_score,
+                                       selected_at, auto_approved)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (book_id, job_id, variant_index, quality_score,
+         datetime.now(UTC).isoformat(), 1 if auto_approved else 0),
+    )
+
+
+async def get_winner(book_id: str) -> Optional[Dict]:
+    return await fetchone(
+        "SELECT * FROM winner_selections WHERE book_id = ?", (book_id,)
+    )
+
+
+async def get_all_winners() -> List[Dict]:
+    return await fetchall(
+        "SELECT ws.*, b.title, b.author FROM winner_selections ws "
+        "JOIN books b ON ws.book_id = b.id ORDER BY ws.selected_at DESC"
+    )
+
+
+# ─── Prompts ──────────────────────────────────────────────────────────────────
+async def get_all_prompts() -> List[Dict]:
+    return await fetchall("SELECT * FROM prompts ORDER BY category, name")
+
+
+async def get_prompt(prompt_id: int) -> Optional[Dict]:
+    return await fetchone("SELECT * FROM prompts WHERE id = ?", (prompt_id,))
+
+
+async def create_prompt(data: Dict[str, Any]) -> int:
+    return await execute(
+        """
+        INSERT INTO prompts (name, category, template, negative_prompt, style_profile,
+                              created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            data["name"], data.get("category", "general"), data["template"],
+            data.get("negative_prompt"), data.get("style_profile"),
+            datetime.now(UTC).isoformat(), datetime.now(UTC).isoformat(),
+        ),
+    )
+
+
+async def update_prompt(prompt_id: int, data: Dict[str, Any]) -> None:
+    # Save version first
+    existing = await get_prompt(prompt_id)
+    if existing:
+        versions = await fetchall(
+            "SELECT MAX(version) as v FROM prompt_versions WHERE prompt_id = ?",
+            (prompt_id,)
+        )
+        next_v = (versions[0]["v"] or 0) + 1 if versions else 1
+        await execute(
+            """INSERT INTO prompt_versions (prompt_id, version, template, negative_prompt, style_profile, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (prompt_id, next_v, existing["template"], existing.get("negative_prompt"),
+             existing.get("style_profile"), datetime.now(UTC).isoformat())
+        )
+    sets = []
+    vals = []
+    for k in ("name", "category", "template", "negative_prompt", "style_profile"):
+        if k in data:
+            sets.append(f"{k} = ?")
+            vals.append(data[k])
+    sets.append("updated_at = ?")
+    vals.append(datetime.now(UTC).isoformat())
+    vals.append(prompt_id)
+    await execute(f"UPDATE prompts SET {', '.join(sets)} WHERE id = ?", tuple(vals))
+
+
+async def delete_prompt(prompt_id: int) -> None:
+    await execute("DELETE FROM prompt_versions WHERE prompt_id = ?", (prompt_id,))
+    await execute("DELETE FROM prompts WHERE id = ?", (prompt_id,))
+
+
+# ─── Batch jobs ───────────────────────────────────────────────────────────────
+async def create_batch_job(data: Dict[str, Any]) -> str:
+    import uuid
+    batch_id = str(uuid.uuid4())
+    await execute(
+        """
+        INSERT INTO batch_jobs (id, name, status, book_ids, model, variant_count,
+                                 prompt_strategy, total_books, estimated_cost, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            batch_id, data.get("name", f"Batch {batch_id[:8]}"),
+            "queued",
+            json.dumps(data["book_ids"]),
+            data["model"],
+            data.get("variant_count", 3),
+            data.get("prompt_strategy", "auto"),
+            len(data["book_ids"]),
+            data.get("estimated_cost"),
+            datetime.now(UTC).isoformat(),
+        ),
+    )
+    return batch_id
+
+
+async def get_batch_job(batch_id: str) -> Optional[Dict]:
+    return await fetchone("SELECT * FROM batch_jobs WHERE id = ?", (batch_id,))
+
+
+async def get_batch_jobs(limit: int = 50) -> List[Dict]:
+    return await fetchall(
+        "SELECT * FROM batch_jobs ORDER BY created_at DESC LIMIT ?", (limit,)
+    )
+
+
+async def update_batch_job(batch_id: str, **kwargs) -> None:
+    if not kwargs:
+        return
+    sets = ", ".join(f"{k} = ?" for k in kwargs)
+    values = tuple(kwargs.values()) + (batch_id,)
+    await execute(f"UPDATE batch_jobs SET {sets} WHERE id = ?", values)
+
+
+# ─── Settings ─────────────────────────────────────────────────────────────────
+async def get_setting(key: str, default: Any = None) -> Any:
+    row = await fetchone("SELECT value FROM settings WHERE key = ?", (key,))
+    if row:
+        try:
+            return json.loads(row["value"])
+        except Exception:
+            return row["value"]
+    return default
+
+
+async def set_setting(key: str, value: Any) -> None:
+    val = json.dumps(value)
+    await execute(
+        """INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+           ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at""",
+        (key, val, datetime.now(UTC).isoformat()),
+    )
+
+
+async def get_all_settings() -> Dict[str, Any]:
+    rows = await fetchall("SELECT key, value FROM settings")
+    result = {}
+    for r in rows:
+        try:
+            result[r["key"]] = json.loads(r["value"])
+        except Exception:
+            result[r["key"]] = r["value"]
+    return result
