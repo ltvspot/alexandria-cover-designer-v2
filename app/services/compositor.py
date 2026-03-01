@@ -1,19 +1,20 @@
 """
-Compositor v3 — 4-layer clean medallion replacement.
-Exact Python/Pillow port of static client compositor.js.
+Compositor v6 — frame-first overlay pipeline (bleed-safe by construction).
 
-Algorithm (4 layers):
-  0. Background fill — sampled from cover near medallion (darkest of 4 points)
-  1. Generated illustration clipped to illustrationRadius = radius * 1.24
-  2. Synthetic beveled gold ring at illustration edge (RING_WIDTH=14px wide)
-  3. Original cover with circular punch at punchRadius = radius * 1.26
-     (removes old medallion zone, reveals layers 0-2 underneath)
+Why this exists:
+The ornamental medallion frame must remain intact. Prior geometric punch/clip
+approaches can drift and let generated art bleed into scrollwork.
 
-Constants match compositor.js exactly:
-  ILLUSTRATION_RATIO = 1.24
-  PUNCH_RATIO        = 1.26
-  RING_WIDTH         = 14 (pixels)
+New pipeline:
+  1) Render generated artwork on a background layer.
+  2) Build an RGBA overlay from the original cover where the medallion opening is transparent.
+  3) Composite overlay on top of generated layer.
+
+Because frame pixels are literally drawn on top, artwork cannot overlap ornaments.
 """
+
+from __future__ import annotations
+
 import logging
 import math
 from io import BytesIO
@@ -21,7 +22,7 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image, ImageDraw
 
 from app.config import (
     COVER_DPI,
@@ -30,40 +31,40 @@ from app.config import (
     MEDALLION_CENTER_X,
     MEDALLION_CENTER_Y,
     MEDALLION_RADIUS,
+    OVERLAYS_DIR,
     OUTPUTS_DIR,
 )
 
 logger = logging.getLogger(__name__)
 
-# Matches compositor.js constants exactly
+# Back-compat constants (legacy compositor versions referenced these names)
 ILLUSTRATION_RATIO = 1.24
 PUNCH_RATIO = 1.26
 RING_WIDTH = 14
 
+# v6 constants
+OVERLAY_BASE_OUTER_RADIUS = 520.0
+OVERLAY_FILL_RATIO = 1.35
+OPENING_MASK_SAMPLES = 1080
+OPENING_MASK_SUPERSAMPLE = 4
+OPENING_MASK_SAFETY_PX = 0.0
 
-# ─── Energy-based crop center ────────────────────────────────────────────────
 
 def _find_energy_center(img: Image.Image) -> Tuple[float, float]:
     """
-    Port of findBestCropCenter() from compositor.js.
-    Compute gradient energy at 150×150, blur with 3×3 kernel,
-    return luminance center-of-mass as normalized (x, y) in [0,1].
+    Compute detail center from gradient-energy center of mass (normalized 0..1).
     """
     size = 150
     small = img.convert("RGB").resize((size, size), Image.LANCZOS)
     arr = np.array(small, dtype=np.float32)
 
-    # Gradient energy (x-gradient + y-gradient per pixel)
     energy = np.zeros((size, size), dtype=np.float32)
     for y in range(1, size - 1):
         for x in range(1, size - 1):
-            gx = (np.abs(arr[y, x] - arr[y, x + 1]) +
-                  np.abs(arr[y, x + 1] - arr[y, x - 1])).sum() / 6.0
-            gy = (np.abs(arr[y, x] - arr[y + 1, x]) +
-                  np.abs(arr[y + 1, x] - arr[y - 1, x])).sum() / 6.0
+            gx = (np.abs(arr[y, x] - arr[y, x + 1]) + np.abs(arr[y, x + 1] - arr[y, x - 1])).sum() / 6.0
+            gy = (np.abs(arr[y, x] - arr[y + 1, x]) + np.abs(arr[y + 1, x] - arr[y - 1, x])).sum() / 6.0
             energy[y, x] = (gx + gy) / 2.0
 
-    # Use scipy convolve when available; fallback to numpy-only blur when absent.
     kernel = np.array([[1, 2, 1], [2, 4, 2], [1, 2, 1]], dtype=np.float32) / 16.0
     try:
         from scipy.ndimage import convolve
@@ -93,19 +94,15 @@ def _find_energy_center(img: Image.Image) -> Tuple[float, float]:
     return cx, cy
 
 
-# ─── Smart square crop ────────────────────────────────────────────────────────
-
 def _smart_square_crop(img: Image.Image, crop_center: Tuple[float, float], diameter: int) -> Image.Image:
     """
-    Center on the energy hotspot, crop to square, resize to diameter×diameter.
-    Clamps crop center to [0.2, 0.8] range (matches JS clampedX/clampedY).
+    Center on energy hotspot, crop to square, resize to diameter×diameter.
     """
     cx_norm, cy_norm = crop_center
     cx_norm = max(0.2, min(0.8, cx_norm))
     cy_norm = max(0.2, min(0.8, cy_norm))
 
     img_w, img_h = img.size
-    # Square crop: use the smaller dimension
     src_side = min(img_w, img_h)
 
     src_x = int(cx_norm * img_w - src_side / 2)
@@ -117,13 +114,9 @@ def _smart_square_crop(img: Image.Image, crop_center: Tuple[float, float], diame
     return cropped.resize((diameter, diameter), Image.LANCZOS)
 
 
-# ─── Background color sampling ────────────────────────────────────────────────
-
 def _sample_background_color(cover: Image.Image, cx: int, cy: int) -> Tuple[int, int, int]:
     """
-    Port of sampleBackgroundColor() from compositor.js.
-    Samples 4 points around the medallion area, returns the darkest (navy).
-    Uses a 100×100 downscaled version for speed.
+    Sample a navy-like background color around the medallion region.
     """
     size = 100
     W, H = cover.size
@@ -132,7 +125,6 @@ def _sample_background_color(cover: Image.Image, cx: int, cy: int) -> Tuple[int,
 
     s_cx = int(cx / W * size)
     s_cy = int(cy / H * size)
-
     points = [
         (s_cx, 5),
         (s_cx, size - 5),
@@ -147,113 +139,161 @@ def _sample_background_color(cover: Image.Image, cx: int, cy: int) -> Tuple[int,
         r, g, b = int(arr[py, px, 0]), int(arr[py, px, 1]), int(arr[py, px, 2])
         samples.append((r, g, b, r + g + b))
 
-    # Return the darkest sample (smallest sum)
     samples.sort(key=lambda x: x[3])
     r, g, b, _ = samples[0]
     return (r, g, b)
 
 
-# ─── Circle mask helper ───────────────────────────────────────────────────────
-
 def _make_circle_mask_full(canvas_size: Tuple[int, int], cx: int, cy: int, radius: int) -> Image.Image:
-    """
-    White-filled circle on black background, full canvas size.
-    No feathering (v3 uses hard edges for the punch).
-    """
     mask = Image.new("L", canvas_size, 0)
     draw = ImageDraw.Draw(mask)
-    draw.ellipse(
-        [cx - radius, cy - radius, cx + radius, cy + radius],
-        fill=255,
-    )
+    draw.ellipse([cx - radius, cy - radius, cx + radius, cy + radius], fill=255)
     return mask
 
 
-# ─── Gold ring drawing ────────────────────────────────────────────────────────
+def _angle_delta(a: float, b: float) -> float:
+    """Smallest signed angular difference a-b in [-pi, pi]."""
+    return (a - b + math.pi) % (2 * math.pi) - math.pi
 
-def _draw_gold_ring(img: Image.Image, cx: int, cy: int, radius: int, width: int = RING_WIDTH) -> Image.Image:
+
+def _opening_radius(theta: float, outer_radius: float) -> float:
     """
-    Port of _drawGoldRing() from compositor.js.
-    Draws a beveled metallic gold ring using (width+1) concentric circles
-    with a bevel brightness profile, plus 72 bead highlights.
-
-    Bevel profile (t = 0..1 across ring width):
-      t < 0.15  →  brightness = 0.3 + t * 2.5      (dark inner edge, ramping up)
-      t < 0.45  →  brightness = 0.7 + (t-0.15)*1.0  (medium, rising to peak)
-      t < 0.55  →  brightness = 1.0                  (peak highlight)
-      t < 0.85  →  brightness = 1.0 - (t-0.55)*1.0  (falling from peak)
-      else      →  brightness = 0.7 - (t-0.85)*2.5  (dark outer edge)
-
-    Gold base color: R=210, G=170, B=70 at full brightness.
+    Parametric opening model from the bleeding report appendix.
+    Scaled to the current detected medallion outer radius.
     """
-    result = img.copy().convert("RGBA")
-    ring_layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
-    draw = ImageDraw.Draw(ring_layer)
+    s = outer_radius / OVERLAY_BASE_OUTER_RADIUS
 
-    half_w = width / 2.0
-    inner_r = radius - half_w
+    d_top = _angle_delta(theta, 3 * math.pi / 2)
+    d_bottom = _angle_delta(theta, math.pi / 2)
+    d_right = _angle_delta(theta, 0.0)
+    d_left = _angle_delta(theta, math.pi)
 
-    # Draw (width+1) concentric pixel-width arcs
-    for i in range(width + 1):
-        r = inner_r + i
-        t = i / width
+    r = (
+        420.0
+        - 70.0 * math.exp(-(d_top * d_top) / 0.09)
+        + 30.0 * math.exp(-(d_bottom * d_bottom) / 0.16)
+        - 15.0 * math.exp(-(d_right * d_right) / 0.04)
+        - 15.0 * math.exp(-(d_left * d_left) / 0.04)
+        - 15.0 * math.cos(2.0 * theta)
+    )
+    return max(220.0 * s, r * s)
 
-        if t < 0.15:
-            brightness = 0.3 + t * 2.5
-        elif t < 0.45:
-            brightness = 0.7 + (t - 0.15) * 1.0
-        elif t < 0.55:
-            brightness = 1.0
-        elif t < 0.85:
-            brightness = 1.0 - (t - 0.55) * 1.0
-        else:
-            brightness = 0.7 - (t - 0.85) * 2.5
 
-        gr = min(255, int(210 * brightness))
-        gg = min(255, int(170 * brightness))
-        gb = min(255, int(70 * brightness))
+def _build_parametric_opening_mask(
+    canvas_size: Tuple[int, int],
+    cx: int,
+    cy: int,
+    outer_radius: int,
+    samples: int = OPENING_MASK_SAMPLES,
+    supersample: int = OPENING_MASK_SUPERSAMPLE,
+    safety_px: float = OPENING_MASK_SAFETY_PX,
+) -> Image.Image:
+    """
+    Build an anti-aliased alpha mask for the medallion opening.
+    White (255) = opening area where generated art should remain visible.
+    """
+    W, H = canvas_size
+    ss = max(1, int(supersample))
+    mask_hr = Image.new("L", (W * ss, H * ss), 0)
+    draw_hr = ImageDraw.Draw(mask_hr)
 
-        # Draw circle outline at radius r with width ~1.5px (draw twice for anti-alias effect)
-        bbox = [cx - r, cy - r, cx + r, cy + r]
-        draw.ellipse(bbox, outline=(gr, gg, gb, 255), width=2)
+    pts = []
+    for i in range(samples):
+        theta = (2.0 * math.pi * i) / samples
+        r = max(1.0, _opening_radius(theta, float(outer_radius)) - float(safety_px))
+        x = cx + r * math.cos(theta)
+        y = cy + r * math.sin(theta)
+        pts.append((x * ss, y * ss))
 
-    # 72 bead highlights
-    num_beads = 72
-    bead_radius = max(2, int(width * 0.25))
-    for i in range(num_beads):
-        angle = (2 * math.pi * i) / num_beads
-        bx = cx + radius * math.cos(angle)
-        by = cy + radius * math.sin(angle)
+    draw_hr.polygon(pts, fill=255)
 
-        # Radial gradient bead: bright center, transparent edge
-        bead = Image.new("RGBA", (bead_radius * 4, bead_radius * 4), (0, 0, 0, 0))
-        bead_draw = ImageDraw.Draw(bead)
-        # Approximate radial gradient with concentric circles
-        for step in range(bead_radius, 0, -1):
-            frac = step / bead_radius
-            alpha = int(204 * frac)  # 0.8 * 255 = 204 at center
-            if frac > 0.5:
-                color = (255, 235, 160, alpha)
-            elif frac > 0.1:
-                color = (210, 170, 70, int(153 * frac * 2))  # 0.6 * 255 = 153
-            else:
-                color = (150, 120, 40, 0)
-            cx2 = bead_radius * 2
-            cy2 = bead_radius * 2
-            bead_draw.ellipse(
-                [cx2 - step, cy2 - step, cx2 + step, cy2 + step],
-                fill=color,
-            )
+    if ss > 1:
+        return mask_hr.resize((W, H), Image.LANCZOS)
+    return mask_hr
 
-        paste_x = int(bx) - bead_radius * 2
-        paste_y = int(by) - bead_radius * 2
-        ring_layer.alpha_composite(bead, dest=(paste_x, paste_y))
 
-    result.alpha_composite(ring_layer)
+def _build_cover_overlay(cover_rgba: Image.Image, opening_mask: Image.Image) -> Image.Image:
+    """
+    Return RGBA overlay where the opening is transparent and everything else is opaque cover pixels.
+    """
+    overlay = cover_rgba.copy().convert("RGBA")
+    # opening_mask: 255 inside opening, 0 outside
+    alpha = Image.eval(opening_mask, lambda p: 255 - p)
+    overlay.putalpha(alpha)
+    return overlay
+
+
+def _overlay_cache_path(cover_path: Path, center_x: int, center_y: int, radius: int) -> Path:
+    return OVERLAYS_DIR / f"{cover_path.stem}_cx{center_x}_cy{center_y}_r{radius}.png"
+
+
+def _get_or_create_cover_overlay(
+    cover_rgba: Image.Image,
+    cover_path: Optional[Path],
+    center_x: int,
+    center_y: int,
+    radius: int,
+) -> Image.Image:
+    opening_mask = _build_parametric_opening_mask(cover_rgba.size, center_x, center_y, radius)
+    overlay = _build_cover_overlay(cover_rgba, opening_mask)
+
+    if not cover_path:
+        return overlay
+
+    try:
+        OVERLAYS_DIR.mkdir(parents=True, exist_ok=True)
+        cache_path = _overlay_cache_path(cover_path, center_x, center_y, radius)
+        if cache_path.exists():
+            cached = Image.open(cache_path).convert("RGBA")
+            if cached.size == cover_rgba.size:
+                return cached
+
+        overlay.save(cache_path, "PNG", optimize=True)
+    except Exception as e:  # pragma: no cover
+        logger.warning("Overlay cache write/read failed for %s: %s", cover_path, e)
+
+    return overlay
+
+
+def _overlay_composite_image(
+    cover_rgba: Image.Image,
+    generated_rgba: Image.Image,
+    center_x: int,
+    center_y: int,
+    radius: int,
+    cover_path: Optional[Path] = None,
+) -> Image.Image:
+    """
+    Core in-memory compositor for tests and runtime.
+    """
+    W, H = cover_rgba.size
+
+    # Layer A: background + generated artwork
+    bg_color = _sample_background_color(cover_rgba, center_x, center_y)
+    result = Image.new("RGBA", (W, H), bg_color + (255,))
+
+    fill_radius = round(radius * OVERLAY_FILL_RATIO)
+    crop_center = _find_energy_center(generated_rgba)
+    generated_cropped = _smart_square_crop(generated_rgba, crop_center, fill_radius * 2)
+
+    gen_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    gen_layer.paste(generated_cropped, (center_x - fill_radius, center_y - fill_radius))
+
+    fill_mask = _make_circle_mask_full((W, H), center_x, center_y, fill_radius)
+    result = Image.composite(gen_layer, result, fill_mask)
+
+    # Layer B: original cover overlay with transparent opening
+    overlay = _get_or_create_cover_overlay(
+        cover_rgba=cover_rgba,
+        cover_path=cover_path,
+        center_x=center_x,
+        center_y=center_y,
+        radius=radius,
+    )
+    result.alpha_composite(overlay)
+
     return result
 
-
-# ─── Main v3 composite function ────────────────────────────────────────────────
 
 def composite_v3(
     cover_path: Path,
@@ -264,84 +304,35 @@ def composite_v3(
     radius: int = MEDALLION_RADIUS,
 ) -> Path:
     """
-    4-layer v3 compositor — exact port of compositor.js _cleanComposite().
-
-    Layer 0: Solid fill with background color sampled from cover
-    Layer 1: Generated illustration clipped to illustrationRadius (radius * 1.24)
-    Layer 2: Synthetic beveled gold ring at illustration edge
-    Layer 3: Cover with circular punch at punchRadius (radius * 1.26), removing old medallion
+    Composite generated art into cover while guaranteeing frame preservation.
     """
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
     out_path = OUTPUTS_DIR / f"{job_id}_composited.jpg"
 
-    illustration_radius = round(radius * ILLUSTRATION_RATIO)
-    punch_radius = round(radius * PUNCH_RATIO)
-
-    logger.info(
-        "Compositor v3: detected_r=%d illustration_r=%d punch_r=%d",
-        radius, illustration_radius, punch_radius,
-    )
-
-    # Load images
     cover = Image.open(cover_path).convert("RGBA")
     if cover.size != (COVER_WIDTH, COVER_HEIGHT):
         logger.warning("Cover size %s differs from expected; resizing", cover.size)
         cover = cover.resize((COVER_WIDTH, COVER_HEIGHT), Image.LANCZOS)
-    W, H = cover.size
 
     generated = Image.open(BytesIO(generated_image_bytes)).convert("RGBA")
+    result = _overlay_composite_image(
+        cover,
+        generated,
+        center_x,
+        center_y,
+        radius,
+        cover_path=cover_path,
+    )
 
-    # Smart crop: find energy center, square-crop, resize to illustration diameter
-    crop_center = _find_energy_center(generated)
-    generated_cropped = _smart_square_crop(generated, crop_center, illustration_radius * 2)
-
-    # ── Layer 0: Background fill ─────────────────────────────────────────────
-    bg_color = _sample_background_color(cover, center_x, center_y)
-    result = Image.new("RGBA", (W, H), bg_color + (255,))
-
-    # ── Layer 1: Illustration clipped to illustrationRadius ──────────────────
-    # Place generated_cropped centered at (center_x, center_y)
-    paste_x = center_x - illustration_radius
-    paste_y = center_y - illustration_radius
-
-    # Create circular mask for illustration
-    illus_mask = _make_circle_mask_full((W, H), center_x, center_y, illustration_radius)
-
-    # Create a full-canvas layer with generated image placed at medallion location
-    gen_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    gen_layer.paste(generated_cropped, (paste_x, paste_y))
-
-    # Composite illustration over background using circle mask
-    result = Image.composite(gen_layer, result, illus_mask)
-
-    # ── Layer 2: Gold ring ────────────────────────────────────────────────────
-    result = _draw_gold_ring(result, center_x, center_y, illustration_radius, RING_WIDTH)
-
-    # ── Layer 3: Cover with circular punch ───────────────────────────────────
-    # Punch = remove cover pixels inside punchRadius (reveals layers 0-2 underneath)
-    cover_punched = cover.copy()
-    punch_draw = ImageDraw.Draw(cover_punched)
-    # Set alpha to 0 inside punch circle (destination-out equivalent)
-    punch_mask = _make_circle_mask_full((W, H), center_x, center_y, punch_radius)
-    # Make alpha channel: transparent inside circle, opaque outside
-    r_ch, g_ch, b_ch, a_ch = cover_punched.split()
-    # Invert punch mask: 255 outside circle, 0 inside
-    from PIL import ImageChops
-    inv_punch = ImageChops.invert(punch_mask)
-    a_ch = ImageChops.multiply(a_ch, inv_punch)
-    cover_punched = Image.merge("RGBA", (r_ch, g_ch, b_ch, a_ch))
-
-    result.alpha_composite(cover_punched)
-
-    # Save as JPEG 300 DPI quality 95
     result.convert("RGB").save(out_path, "JPEG", quality=95, dpi=(COVER_DPI, COVER_DPI))
-    logger.info("Compositor v3 saved: %s (%d bytes)", out_path, out_path.stat().st_size)
+    logger.info("Compositor v6 saved: %s (%d bytes)", out_path, out_path.stat().st_size)
     return out_path
 
 
 def make_output_thumbnail(composited_path: Path, job_id: str) -> Optional[Path]:
     """Create a small preview thumbnail of the composited cover."""
     from app.config import THUMBNAILS_DIR, THUMBNAIL_SIZE
+
     THUMBNAILS_DIR.mkdir(parents=True, exist_ok=True)
     dest = THUMBNAILS_DIR / f"{job_id}_result_thumb.jpg"
     try:
@@ -354,7 +345,6 @@ def make_output_thumbnail(composited_path: Path, job_id: str) -> Optional[Path]:
         return None
 
 
-# Keep old composite() as an alias pointing to v3 for backwards compatibility
 def composite(
     cover_path: Path,
     generated_image_bytes: bytes,
@@ -362,9 +352,9 @@ def composite(
     center_x: int = MEDALLION_CENTER_X,
     center_y: int = MEDALLION_CENTER_Y,
     radius: int = MEDALLION_RADIUS,
-    feather: int = 0,  # ignored in v3
+    feather: int = 0,
 ) -> Path:
-    """Alias to composite_v3 — feather parameter is unused in v3."""
+    """Backwards-compatible alias."""
     return composite_v3(
         cover_path=cover_path,
         generated_image_bytes=generated_image_bytes,

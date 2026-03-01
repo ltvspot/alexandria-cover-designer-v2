@@ -1,105 +1,112 @@
-"""Tests for compositor v3."""
-import pytest
-from pathlib import Path
-from PIL import Image
+"""Tests for bleed-safe compositor (overlay pipeline)."""
+
 from io import BytesIO
+
 import numpy as np
+from PIL import Image, ImageDraw
 
 from app.services.compositor import (
-    ILLUSTRATION_RATIO, PUNCH_RATIO, RING_WIDTH,
-    _find_energy_center, _smart_square_crop,
-    _sample_background_color, _draw_gold_ring,
+    OVERLAY_FILL_RATIO,
+    _build_cover_overlay,
+    _build_parametric_opening_mask,
+    _opening_radius,
+    _overlay_composite_image,
     composite_v3,
 )
 
 
-def _make_test_image(w=200, h=200, color=(100, 150, 200)):
-    """Create a simple test image."""
-    return Image.new("RGB", (w, h), color)
-
-
-def _image_to_bytes(img):
+def _image_to_bytes(img: Image.Image) -> bytes:
     buf = BytesIO()
     img.save(buf, "PNG")
     return buf.getvalue()
 
 
-def test_constants():
-    assert ILLUSTRATION_RATIO == 1.24
-    assert PUNCH_RATIO == 1.26
-    assert RING_WIDTH == 14
+def _make_cover(w=1200, h=900, cx=850, cy=450, r=220) -> Image.Image:
+    """Synthetic cover with visible ornament-like structure around medallion."""
+    cover = Image.new("RGB", (w, h), (26, 39, 68))
+    d = ImageDraw.Draw(cover)
+
+    # faux ornament ring
+    d.ellipse((cx - r - 28, cy - r - 28, cx + r + 28, cy + r + 28), outline=(210, 180, 120), width=18)
+    d.ellipse((cx - r - 8, cy - r - 8, cx + r + 8, cy + r + 8), outline=(245, 215, 160), width=10)
+
+    # faux acanthus/crown protrusions
+    d.polygon([(cx - 30, cy - r - 85), (cx, cy - r - 120), (cx + 30, cy - r - 85)], fill=(220, 190, 130))
+    d.polygon([(cx - r - 95, cy + 20), (cx - r - 125, cy + 50), (cx - r - 80, cy + 70)], fill=(220, 190, 130))
+    d.polygon([(cx + r + 95, cy + 20), (cx + r + 125, cy + 50), (cx + r + 80, cy + 70)], fill=(220, 190, 130))
+
+    return cover
 
 
-def test_illustration_radius_larger_than_punch():
-    """punch_radius > illustration_radius means cover fully covers the ring."""
-    radius = 520
-    illus_r = round(radius * ILLUSTRATION_RATIO)
-    punch_r = round(radius * PUNCH_RATIO)
-    assert punch_r > illus_r, "Punch radius must be larger than illustration radius"
+def test_parametric_opening_has_angle_variation():
+    """Top opening should be tighter than bottom opening."""
+    r = 520
+    top = _opening_radius(3 * np.pi / 2, r)
+    bottom = _opening_radius(np.pi / 2, r)
+    assert bottom > top
 
 
-def test_find_energy_center():
-    """Energy center should be in [0,1] range."""
-    img = _make_test_image(100, 100)
-    cx, cy = _find_energy_center(img.convert("RGBA"))
-    assert 0.0 <= cx <= 1.0
-    assert 0.0 <= cy <= 1.0
+def test_opening_mask_non_empty_and_centered():
+    mask = _build_parametric_opening_mask((1200, 900), 850, 450, 220)
+    arr = np.array(mask)
+    assert arr.max() > 200
+    assert arr[450, 850] > 200  # center is inside opening
 
 
-def test_find_energy_center_clamped():
-    """Center should be clamped to [0.2, 0.8] by smart_square_crop."""
-    img = _make_test_image(200, 200)
-    arr = np.array(img)
-    # Bright spot at extreme corner
-    arr[0:10, 0:10] = [255, 255, 0]
-    bright_img = Image.fromarray(arr).convert("RGBA")
-    cx, cy = _find_energy_center(bright_img)
-    # smart_square_crop clamps, not find_energy_center
-    # Just verify it returns a normalized value
-    assert 0.0 <= cx <= 1.0
-    assert 0.0 <= cy <= 1.0
+def test_cover_overlay_is_transparent_inside_opening():
+    cover = _make_cover().convert("RGBA")
+    mask = _build_parametric_opening_mask(cover.size, 850, 450, 220)
+    overlay = _build_cover_overlay(cover, mask)
+
+    alpha = np.array(overlay.split()[-1])
+    assert alpha[450, 850] < 10  # opening center transparent
+    assert alpha[40, 40] > 245   # outer area opaque
 
 
-def test_smart_square_crop():
-    """Output should be a square at the requested diameter."""
-    img = _make_test_image(300, 200).convert("RGBA")
-    result = _smart_square_crop(img, (0.5, 0.5), 100)
-    assert result.size == (100, 100)
+def test_overlay_composite_preserves_cover_outside_opening_exactly():
+    """No bleed guarantee: outside opening must remain pixel-identical to source cover."""
+    cx, cy, r = 850, 450, 220
+    cover = _make_cover(cx=cx, cy=cy, r=r).convert("RGBA")
+
+    # extreme generated art to expose bleeding if any
+    gen = Image.new("RGBA", (1024, 1024), (255, 20, 20, 255))
+    gdraw = ImageDraw.Draw(gen)
+    gdraw.rectangle((0, 0, 1023, 80), fill=(0, 255, 0, 255))
+    gdraw.rectangle((0, 943, 1023, 1023), fill=(0, 0, 255, 255))
+
+    result = _overlay_composite_image(cover, gen, cx, cy, r)
+
+    opening = np.array(_build_parametric_opening_mask(cover.size, cx, cy, r))
+    outside = opening == 0
+
+    src = np.array(cover.convert("RGB"), dtype=np.int16)
+    out = np.array(result.convert("RGB"), dtype=np.int16)
+
+    diff = np.abs(src - out).sum(axis=2)
+    assert diff[outside].max() == 0, "Pixels outside medallion opening changed (bleed)"
+
+    # and inside should actually change
+    inside = opening >= 254
+    assert diff[inside].mean() > 5
 
 
-def test_sample_background_color():
-    """Should return the darkest of 4 sampled points."""
-    cover = Image.new("RGB", (3784, 2777), (26, 39, 68))  # navy
-    color = _sample_background_color(cover, 2850, 1350)
-    assert len(color) == 3
-    # Color should be close to navy (26, 39, 68)
-    assert all(0 <= c <= 255 for c in color)
-
-
-def test_draw_gold_ring_doesnt_crash():
-    """Gold ring drawing should complete without error."""
-    img = Image.new("RGBA", (500, 500), (26, 39, 68, 255))
-    result = _draw_gold_ring(img, 250, 250, 100, RING_WIDTH)
-    assert result.size == (500, 500)
-    assert result.mode == "RGBA"
+def test_fill_ratio_is_generous():
+    assert OVERLAY_FILL_RATIO >= 1.2
 
 
 def test_composite_v3_output_size(tmp_path):
-    """composite_v3 must output a 3784×2777 JPEG."""
-    # Create fake cover
+    """File output remains full cover dimensions."""
     cover_path = tmp_path / "cover.jpg"
-    cover = Image.new("RGB", (3784, 2777), (26, 39, 68))
+    cover = _make_cover(3784, 2777, 2850, 1350, 520)
     cover.save(cover_path, "JPEG")
 
-    # Create fake generated image
-    gen_img = _make_test_image(512, 512, (200, 100, 50))
-    gen_bytes = _image_to_bytes(gen_img)
+    gen = Image.new("RGB", (768, 768), (200, 100, 50))
+    gen_bytes = _image_to_bytes(gen)
 
-    # Override OUTPUTS_DIR
     import app.services.compositor as comp_module
+
     original_dir = comp_module.OUTPUTS_DIR
     comp_module.OUTPUTS_DIR = tmp_path
-
     try:
         out_path = composite_v3(
             cover_path=cover_path,

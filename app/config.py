@@ -12,6 +12,7 @@ DATA_DIR = BASE_DIR / "data"
 COVERS_DIR = DATA_DIR / "covers"
 OUTPUTS_DIR = DATA_DIR / "outputs"
 THUMBNAILS_DIR = DATA_DIR / "thumbnails"
+OVERLAYS_DIR = DATA_DIR / "overlays"
 DB_PATH = DATA_DIR / "app.db"
 
 # ─── Google Drive ─────────────────────────────────────────────────────────────
