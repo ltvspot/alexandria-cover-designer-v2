@@ -35,7 +35,7 @@ router = APIRouter(prefix="/api")
 
 @router.get("/health")
 async def health():
-    return {"status": "ok", "service": "alexandria-cover-designer-v2"}
+    return {"status": "ok"}
 
 
 # ─── Books ────────────────────────────────────────────────────────────────────
@@ -112,16 +112,16 @@ async def book_update(book_id: str, req: BookUpdateRequest):
 
 class GenerateRequest(BaseModel):
     book_id: str
-    models: List[str] = Field(default_factory=lambda: ["gemini-2.5-flash-image"])
-    variants: List[int] = Field(default_factory=lambda: [1])
+    models: List[str] = Field(default_factory=lambda: ["nano-banana"])
+    variants: List[int] | int = Field(default=1)
     prompt: Optional[str] = None
 
     class Config:
         json_schema_extra = {
             "example": {
                 "book_id": "some-drive-folder-id",
-                "models": ["gemini-2.5-flash-image"],
-                "variants": [1, 2, 3],
+                "models": ["nano-banana"],
+                "variants": 1,
             }
         }
 
@@ -133,9 +133,14 @@ async def generate(req: GenerateRequest):
     if not book:
         raise HTTPException(status_code=404, detail="Book not found")
 
+    if isinstance(req.variants, int):
+        variants = list(range(1, req.variants + 1))
+    else:
+        variants = req.variants
+
     job_ids = []
     for model in req.models:
-        for variant in req.variants:
+        for variant in variants:
             jid = await queue_job(
                 book_id=req.book_id,
                 model=model,
@@ -736,15 +741,159 @@ async def batches_list():
 
 # ─── Prompts ──────────────────────────────────────────────────────────────────
 
-BUILTIN_PROMPTS = [
-    {"name": "Classic Engraving", "category": "style", "template": "Victorian steel engraving illustration, intricate crosshatching, dramatic chiaroscuro, historical scene depicting {title}, by {author}. Black and white etching style, fine line work.", "negative_prompt": "color, modern, photograph, blurry", "style_profile": "engraving"},
-    {"name": "Oil Painting", "category": "style", "template": "Dramatic oil painting in the style of the Old Masters, rich impasto texture, dramatic lighting from a single source, depicting a scene from {title}. Deep shadows, luminous highlights, classical composition.", "negative_prompt": "digital, flat, modern, cartoon", "style_profile": "oil_painting"},
-    {"name": "Watercolor Sketch", "category": "style", "template": "Delicate watercolor illustration with ink outlines, soft washes of color, loose expressive brushwork depicting themes from {title} by {author}. Impressionistic, ethereal quality.", "negative_prompt": "digital, sharp, photograph, 3d", "style_profile": "watercolor"},
-    {"name": "Art Nouveau", "category": "style", "template": "Art Nouveau illustration in the style of Alphonse Mucha, flowing organic lines, ornate decorative borders, symbolist imagery representing {title}. Rich jewel tones, stylized natural forms.", "negative_prompt": "modern, realistic photograph, simple", "style_profile": "art_nouveau"},
-    {"name": "Romantic Landscape", "category": "mood", "template": "Romantic landscape painting, sweeping vistas, dramatic clouds, sublime natural scenery evoking the themes of {title}. Painterly atmosphere, golden hour light, sense of wonder and solitude.", "negative_prompt": "portrait, close-up, modern, urban", "style_profile": "landscape"},
-    {"name": "Dark Gothic", "category": "mood", "template": "Dark gothic illustration, haunting atmosphere, moonlit scenes, architectural grandeur, mysterious figures, shadows and candlelight. Inspired by {title} by {author}. Woodcut aesthetic.", "negative_prompt": "bright, cheerful, modern, colorful", "style_profile": "gothic"},
-    {"name": "Historical Portrait", "category": "subject", "template": "Formal historical portrait in the style of 18th century academic painting, dignified composition, rich fabric textures, symbolic objects related to {title}. Museum quality finish.", "negative_prompt": "casual, modern clothing, photograph, anime", "style_profile": "portrait"},
-    {"name": "Adventure Scene", "category": "mood", "template": "Dynamic adventure illustration, dramatic action composition, bold graphic style, sense of movement and excitement. Epic scene inspired by the themes of {title}. High contrast, strong silhouettes.", "negative_prompt": "static, boring, portrait, minimalist", "style_profile": "adventure"},
+BUILTIN_PROMPTS_V2 = [
+    {
+        "name": "Sevastopol / Dramatic Conflict",
+        "category": "Cossacks/Military",
+        "template": (
+            'Create a single illustration for the book "{title}" by {author}. '
+            'First, identify the central dramatic conflict or most iconic moment of this story. '
+            'Then depict that specific scene as a 19th-century military-grade oil painting: dense '
+            'atmosphere, cannon smoke or dust, dramatic tension between figures, tattered fabric and '
+            'raw human emotion. Muted palette of ochre, raw umber, gunmetal grey with flashes of '
+            'blood-red. Thick, expressive brushwork in the tradition of Vasily Vereshchagin. '
+            'The composition must be a circular vignette — the subject centred, fully contained within '
+            'the circle, with soft atmospheric fade at the edges into empty space. No content touches the boundary.'
+        ),
+        "negative_prompt": "modern, cartoon, text, watermark, digital art, rectangular framing, content touching border, generic",
+        "style_profile": "military",
+    },
+    {
+        "name": "Cossack / Epic Journey",
+        "category": "Cossacks/Military",
+        "template": (
+            'Create a single illustration for the book "{title}" by {author}. '
+            "First, identify the protagonist and the landscape or world central to this story. "
+            "Then depict the protagonist in motion through that world — on horseback, on foot, or in "
+            "flight — capturing the story's spirit of adventure or struggle. Paint it as a kinetic "
+            "19th-century oil painting with bold, gestural brushwork in the style of Ilya Repin. "
+            "Warm earthy tones — burnt sienna, gold, slate blue — against a dramatic sky. "
+            "The composition must be a circular vignette — the figure centred, fully contained within "
+            "the circle, with atmospheric fade at the edges. No content touches the boundary."
+        ),
+        "negative_prompt": "static, modern, cartoon, photographic, rectangular framing, content touching border, generic",
+        "style_profile": "cavalry",
+    },
+    {
+        "name": "Golden Atmosphere",
+        "category": "Classical Library",
+        "template": (
+            'Create a single illustration for the book "{title}" by {author}. '
+            "First, identify the primary setting and emotional tone of this story. Then paint that "
+            "specific landscape or environment bathed in luminous golden-hour light. Render it as a "
+            "pastoral oil painting in the style of Corot and the Barbizon school: soft diffused natural "
+            "light, warm greens and hazy golds, romantic realism. The composition must be a circular "
+            "vignette — the scene centred, fully contained within the circle, with gentle atmospheric "
+            "haze fading to empty space at the edges. No content touches the boundary."
+        ),
+        "negative_prompt": "urban decay, modern, cold, cartoon, dark, rectangular framing, content touching border, generic",
+        "style_profile": "landscape",
+    },
+    {
+        "name": "Dark Romantic",
+        "category": "Classical Library",
+        "template": (
+            'Create a single illustration for the book "{title}" by {author}. '
+            "First, identify the deepest emotional undercurrent of this story — isolation, longing, "
+            "mystery, or melancholy. Then depict a scene that embodies that mood: a solitary figure, "
+            "an empty landscape, or a symbolic moment from the narrative, set under moonlight or "
+            "twilight. Deep indigo, icy blue-white, and charcoal. Haunting beauty in the Romantic "
+            "tradition of Caspar David Friedrich. The composition must be a circular vignette — the "
+            "subject centred, fully contained within the circle, with dark edges dissolving naturally "
+            "into empty space. No content touches the boundary."
+        ),
+        "negative_prompt": "bright, sunny, cartoon, cheerful, rectangular framing, content touching border, generic",
+        "style_profile": "nocturnal",
+    },
+    {
+        "name": "Gentle Nostalgia",
+        "category": "Classical Library",
+        "template": (
+            'Create a single illustration for the book "{title}" by {author}. '
+            "First, identify the most peaceful, tender, or nostalgic moment in this story. Then paint "
+            "that scene with warm intimacy — characters at rest, a quiet corner of their world, a "
+            "moment of connection or reflection. Soft diffused light in warm greens, hazy golds, and "
+            "gentle blue reflections, in the style of English Romantic landscape painters. The "
+            "composition must be a circular vignette — the scene centred, fully contained within the "
+            "circle, with edges fading softly into empty space. No content touches the boundary."
+        ),
+        "negative_prompt": "violent, industrial, modern, stormy, cartoon, rectangular framing, content touching border, generic",
+        "style_profile": "pastoral",
+    },
+    {
+        "name": "Art Nouveau Symbolic",
+        "category": "Wildcard",
+        "template": (
+            'Create a single illustration for the book "{title}" by {author}. '
+            "First, identify the central symbol, theme, or iconic character of this story. Then render "
+            "them as an Alphonse Mucha-inspired Art Nouveau composition: the figure or symbol framed by "
+            "organic borders of flowing vines, flowers, and decorative elements that reflect the story's "
+            "motifs. Muted jewel tones of sage green, dusty rose, antique gold, and deep teal. The "
+            "composition must be a circular vignette — centred, fully contained within the circle, with "
+            "ornamental elements fading at the edges. No content touches the boundary."
+        ),
+        "negative_prompt": "photorealistic, modern, minimalist, harsh lines, rectangular framing, content touching border, generic",
+        "style_profile": "nouveau",
+    },
+    {
+        "name": "Ukiyo-e Reimagining",
+        "category": "Wildcard",
+        "template": (
+            'Create a single illustration for the book "{title}" by {author}. '
+            "First, identify the most visually striking scene or environment in this story. Then "
+            "reimagine it as a ukiyo-e woodblock print: bold black outlines defining flat areas of "
+            "deep indigo, vermillion, and pale ochre. Translate the story's key moment into the spatial "
+            "tension and pattern-making of Hiroshige and Hokusai. The composition must be a circular "
+            "vignette — centred, fully contained within the circle, with print-style edges dissolving "
+            "into empty space. No content touches the boundary."
+        ),
+        "negative_prompt": "photorealistic, western oil paint, gradient shading, rectangular framing, content touching border, generic",
+        "style_profile": "woodblock",
+    },
+    {
+        "name": "Noir Tension",
+        "category": "Wildcard",
+        "template": (
+            'Create a single illustration for the book "{title}" by {author}. '
+            "First, identify the moment of highest tension, danger, or moral ambiguity in this story. "
+            "Then depict it as a high-contrast film noir composition: dramatic black-and-white with a "
+            "single deep amber or crimson accent. Figures rendered as hard-edged silhouettes, shadows "
+            "slicing across the scene, extreme chiaroscuro. The composition must be a circular vignette "
+            "— centred, fully contained within the circle, with dark edges dissolving into empty space. "
+            "No content touches the boundary."
+        ),
+        "negative_prompt": "colour, pastel, bright, cheerful, busy, rectangular framing, content touching border, generic",
+        "style_profile": "noir",
+    },
+    {
+        "name": "Natural History Study",
+        "category": "Wildcard",
+        "template": (
+            'Create a single illustration for the book "{title}" by {author}. '
+            "First, identify an animal, plant, object, or natural element that is central or symbolic "
+            "to this story. Then render it as a vintage natural history engraving: exquisitely detailed "
+            "scientific illustration with fine intaglio linework and delicate hand-applied watercolour "
+            "washes. Meticulous stipple shading in the style of Redouté and Audubon. The composition "
+            "must be a circular vignette — the specimen centred, fully contained within the circle, "
+            "with fine linework fading at the edges. No content touches the boundary."
+        ),
+        "negative_prompt": "photorealistic, modern, digital, bold, flat, cartoon, rectangular framing, content touching border, generic",
+        "style_profile": "botanical",
+    },
+    {
+        "name": "Gothic Stained Glass",
+        "category": "Wildcard",
+        "template": (
+            'Create a single illustration for the book "{title}" by {author}. '
+            "First, identify the story's most transcendent, spiritual, or mythic moment. Then render "
+            "it as a luminous stained glass window: rich jewel-toned panels of ruby red, cobalt blue, "
+            "emerald green, and amber gold depicting the scene, separated by bold dark leading lines. "
+            "The composition must be a circular rose window vignette — centred, fully contained within "
+            "the circle, with decorative elements fading at the edges. No content touches the boundary."
+        ),
+        "negative_prompt": "photorealistic, modern, muted, flat, cartoon, rectangular framing, content touching border, generic",
+        "style_profile": "stained-glass",
+    },
 ]
 
 
@@ -758,15 +907,16 @@ async def prompts_list(category: Optional[str] = Query(None)):
 
 @router.post("/prompts/seed-builtins")
 async def seed_builtin_prompts():
-    """Seed the 8 built-in style profiles."""
-    existing = await get_all_prompts()
-    existing_names = {p["name"] for p in existing}
+    """Seed the 10 v2 built-in prompt templates."""
     seeded = 0
-    for p in BUILTIN_PROMPTS:
-        if p["name"] not in existing_names:
+    for p in BUILTIN_PROMPTS_V2:
+        existing = await fetchall(
+            "SELECT id FROM prompts WHERE name = ?", (p["name"],)
+        )
+        if not existing:
             await create_prompt(p)
             seeded += 1
-    return {"seeded": seeded}
+    return {"seeded": seeded, "total": len(BUILTIN_PROMPTS_V2)}
 
 
 @router.get("/prompts/{prompt_id}")

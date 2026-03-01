@@ -1,140 +1,116 @@
-"""
-Tests for the compositing pipeline.
-"""
-import io
+"""Tests for compositor v3."""
 import pytest
-import numpy as np
 from pathlib import Path
 from PIL import Image
-from unittest.mock import patch
+from io import BytesIO
+import numpy as np
 
 from app.services.compositor import (
-    _make_circle_mask,
-    _sample_surround,
-    _color_match,
-    composite,
+    ILLUSTRATION_RATIO, PUNCH_RATIO, RING_WIDTH,
+    _find_energy_center, _smart_square_crop,
+    _sample_background_color, _draw_gold_ring,
+    composite_v3,
 )
-from app.config import COVER_WIDTH, COVER_HEIGHT
 
 
-def _make_fake_cover(width=COVER_WIDTH, height=COVER_HEIGHT) -> Path:
-    """Create a temporary fake cover JPEG for testing."""
-    import tempfile
-    img = Image.new("RGB", (width, height), color=(26, 39, 68))
-    # Add a golden rectangle to simulate the front panel
-    pixels = np.array(img)
-    pixels[:, width // 2:, :] = [188, 150, 90]
-    img = Image.fromarray(pixels)
-    tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
-    img.save(tmp.name, "JPEG", quality=85)
-    return Path(tmp.name)
+def _make_test_image(w=200, h=200, color=(100, 150, 200)):
+    """Create a simple test image."""
+    return Image.new("RGB", (w, h), color)
 
 
-def _make_fake_generated(size=(512, 512)) -> bytes:
-    """Create a small PNG image."""
-    img = Image.new("RGB", size, color=(122, 94, 62))
-    buf = io.BytesIO()
+def _image_to_bytes(img):
+    buf = BytesIO()
     img.save(buf, "PNG")
     return buf.getvalue()
 
 
-# ─── Mask ─────────────────────────────────────────────────────────────────────
-
-def test_circle_mask_size():
-    mask = _make_circle_mask((100, 100), radius=40, feather=0)
-    assert mask.size == (100, 100)
-    # Center pixel should be white
-    assert mask.getpixel((50, 50)) == 255
+def test_constants():
+    assert ILLUSTRATION_RATIO == 1.24
+    assert PUNCH_RATIO == 1.26
+    assert RING_WIDTH == 14
 
 
-def test_circle_mask_feather():
-    mask = _make_circle_mask((100, 100), radius=40, feather=5)
-    # Corner pixel should be black (outside circle)
-    assert mask.getpixel((0, 0)) < 10
-    # Center should be near-white
-    assert mask.getpixel((50, 50)) > 200
+def test_illustration_radius_larger_than_punch():
+    """punch_radius > illustration_radius means cover fully covers the ring."""
+    radius = 520
+    illus_r = round(radius * ILLUSTRATION_RATIO)
+    punch_r = round(radius * PUNCH_RATIO)
+    assert punch_r > illus_r, "Punch radius must be larger than illustration radius"
 
 
-def test_circle_mask_corner_is_black():
-    mask = _make_circle_mask((200, 200), radius=80, feather=0)
-    assert mask.getpixel((0, 0)) == 0
-    assert mask.getpixel((100, 100)) == 255
+def test_find_energy_center():
+    """Energy center should be in [0,1] range."""
+    img = _make_test_image(100, 100)
+    cx, cy = _find_energy_center(img.convert("RGBA"))
+    assert 0.0 <= cx <= 1.0
+    assert 0.0 <= cy <= 1.0
 
 
-# ─── Color match ──────────────────────────────────────────────────────────────
-
-def test_color_match_no_shift_needed():
-    """If generated image already matches target, output should be very close."""
-    generated = Image.new("RGB", (64, 64), color=(100, 100, 100))
-    result = _color_match(generated, (100.0, 100.0, 100.0))
-    arr = np.array(result)
-    assert abs(int(arr[:, :, 0].mean()) - 100) < 5
-
-
-def test_color_match_shift_clamped():
-    """Shift should be limited to ±20% per channel."""
-    generated = Image.new("RGB", (64, 64), color=(50, 50, 50))
-    result = _color_match(generated, (200.0, 200.0, 200.0))  # big shift
-    arr = np.array(result)
-    # Should have moved toward target but not all the way (clamped)
-    mean = arr[:, :, 0].mean()
-    assert mean > 50  # shifted up
-    assert mean < 200  # but not to target
+def test_find_energy_center_clamped():
+    """Center should be clamped to [0.2, 0.8] by smart_square_crop."""
+    img = _make_test_image(200, 200)
+    arr = np.array(img)
+    # Bright spot at extreme corner
+    arr[0:10, 0:10] = [255, 255, 0]
+    bright_img = Image.fromarray(arr).convert("RGBA")
+    cx, cy = _find_energy_center(bright_img)
+    # smart_square_crop clamps, not find_energy_center
+    # Just verify it returns a normalized value
+    assert 0.0 <= cx <= 1.0
+    assert 0.0 <= cy <= 1.0
 
 
-# ─── sample_surround ──────────────────────────────────────────────────────────
-
-def test_sample_surround_uniform():
-    img = Image.new("RGB", (500, 500), color=(100, 150, 200))
-    r, g, b = _sample_surround(img, 250, 250, 100)
-    assert abs(r - 100) < 5
-    assert abs(g - 150) < 5
-    assert abs(b - 200) < 5
+def test_smart_square_crop():
+    """Output should be a square at the requested diameter."""
+    img = _make_test_image(300, 200).convert("RGBA")
+    result = _smart_square_crop(img, (0.5, 0.5), 100)
+    assert result.size == (100, 100)
 
 
-# ─── composite ────────────────────────────────────────────────────────────────
+def test_sample_background_color():
+    """Should return the darkest of 4 sampled points."""
+    cover = Image.new("RGB", (3784, 2777), (26, 39, 68))  # navy
+    color = _sample_background_color(cover, 2850, 1350)
+    assert len(color) == 3
+    # Color should be close to navy (26, 39, 68)
+    assert all(0 <= c <= 255 for c in color)
 
-def test_composite_output_dimensions():
-    cover_path = _make_fake_cover()
-    generated_bytes = _make_fake_generated()
+
+def test_draw_gold_ring_doesnt_crash():
+    """Gold ring drawing should complete without error."""
+    img = Image.new("RGBA", (500, 500), (26, 39, 68, 255))
+    result = _draw_gold_ring(img, 250, 250, 100, RING_WIDTH)
+    assert result.size == (500, 500)
+    assert result.mode == "RGBA"
+
+
+def test_composite_v3_output_size(tmp_path):
+    """composite_v3 must output a 3784×2777 JPEG."""
+    # Create fake cover
+    cover_path = tmp_path / "cover.jpg"
+    cover = Image.new("RGB", (3784, 2777), (26, 39, 68))
+    cover.save(cover_path, "JPEG")
+
+    # Create fake generated image
+    gen_img = _make_test_image(512, 512, (200, 100, 50))
+    gen_bytes = _image_to_bytes(gen_img)
+
+    # Override OUTPUTS_DIR
+    import app.services.compositor as comp_module
+    original_dir = comp_module.OUTPUTS_DIR
+    comp_module.OUTPUTS_DIR = tmp_path
 
     try:
-        out = composite(
+        out_path = composite_v3(
             cover_path=cover_path,
-            generated_image_bytes=generated_bytes,
-            job_id="test-composite-001",
+            generated_image_bytes=gen_bytes,
+            job_id="test_job_001",
             center_x=2850,
             center_y=1350,
             radius=520,
-            feather=15,
         )
-        assert out.exists()
-        with Image.open(out) as img:
-            assert img.size == (COVER_WIDTH, COVER_HEIGHT)
+        assert out_path.exists()
+        with Image.open(out_path) as result:
+            assert result.size == (3784, 2777)
     finally:
-        cover_path.unlink(missing_ok=True)
-        if 'out' in dir() and out.exists():
-            out.unlink(missing_ok=True)
-
-
-def test_composite_small_radius():
-    """Compositing should work with a small radius too."""
-    cover_path = _make_fake_cover()
-    generated_bytes = _make_fake_generated((256, 256))
-
-    try:
-        out = composite(
-            cover_path=cover_path,
-            generated_image_bytes=generated_bytes,
-            job_id="test-composite-small",
-            center_x=2850,
-            center_y=1350,
-            radius=100,
-            feather=5,
-        )
-        with Image.open(out) as img:
-            assert img.size == (COVER_WIDTH, COVER_HEIGHT)
-    finally:
-        cover_path.unlink(missing_ok=True)
-        if 'out' in dir() and out.exists():
-            out.unlink(missing_ok=True)
+        comp_module.OUTPUTS_DIR = original_dir

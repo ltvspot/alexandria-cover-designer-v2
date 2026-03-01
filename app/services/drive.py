@@ -44,21 +44,40 @@ def _parse_folder_name(name: str) -> Dict[str, Any]:
 
 async def list_drive_subfolders(folder_id: str = DRIVE_SOURCE_FOLDER_ID) -> List[Dict]:
     """
-    List all subfolders inside the given Drive folder.
-    Returns list of {id, name} dicts.
+    List ALL subfolders inside the given Drive folder using nextPageToken pagination.
+    Handles 999+ folders (10 pages at pageSize=100).
+    Port of drive.js listDriveSubfolders().
     """
     url = f"{DRIVE_API_BASE}/files"
-    params = {
-        "q": f"'{folder_id}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false",
-        "fields": "files(id,name)",
-        "pageSize": 200,
-        "key": GOOGLE_API_KEY,
-    }
+    all_files: List[Dict] = []
+    page_token: Optional[str] = None
+
     async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(url, params=params)
-        resp.raise_for_status()
-        data = resp.json()
-        return data.get("files", [])
+        while True:
+            params: Dict[str, Any] = {
+                "q": (
+                    f"'{folder_id}' in parents "
+                    "and mimeType = 'application/vnd.google-apps.folder' "
+                    "and trashed = false"
+                ),
+                "fields": "nextPageToken,files(id,name)",
+                "pageSize": 100,
+                "key": GOOGLE_API_KEY,
+            }
+            if page_token:
+                params["pageToken"] = page_token
+
+            resp = await client.get(url, params=params)
+            resp.raise_for_status()
+            data = resp.json()
+
+            all_files.extend(data.get("files", []))
+            page_token = data.get("nextPageToken")
+            if not page_token:
+                break
+
+    logger.info("list_drive_subfolders: %d folders found in %s", len(all_files), folder_id)
+    return all_files
 
 
 async def list_drive_files_in_folder(folder_id: str) -> List[Dict]:

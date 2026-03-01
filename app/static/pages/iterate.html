@@ -3,155 +3,126 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Iterate — Alexandria Cover Designer</title>
+  <title>Alexandria Cover Designer v2</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
   <link rel="stylesheet" href="/static/css/style.css">
 </head>
 <body>
+  <div class="app-shell">
+    <!-- Sidebar -->
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-header">
+        <div class="logo">
+          <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
+            <rect x="2" y="4" width="20" height="26" rx="2" stroke="#c5a55a" stroke-width="2" fill="none"/>
+            <rect x="6" y="2" width="20" height="26" rx="2" stroke="#c5a55a" stroke-width="2" fill="#1a2744"/>
+            <circle cx="16" cy="13" r="5" stroke="#c5a55a" stroke-width="1.5" fill="none"/>
+            <line x1="10" y1="22" x2="22" y2="22" stroke="#c5a55a" stroke-width="1.5"/>
+            <line x1="12" y1="25" x2="20" y2="25" stroke="#c5a55a" stroke-width="1"/>
+          </svg>
+          <span class="logo-text">Alexandria</span>
+        </div>
+        <button class="sidebar-toggle" id="sidebarToggle" aria-label="Toggle sidebar">
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor"><path d="M3 5h14a1 1 0 010 2H3a1 1 0 010-2zm0 4h14a1 1 0 010 2H3a1 1 0 010-2zm0 4h14a1 1 0 010 2H3a1 1 0 010-2z"/></svg>
+        </button>
+      </div>
+      <nav class="sidebar-nav" id="sidebarNav">
+        <div class="nav-section">
+          <span class="nav-section-title">Generate</span>
+          <a href="/iterate" class="nav-link active" data-page="iterate">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+            <span>Iterate</span>
+          </a>
+          <a href="/batch" class="nav-link" data-page="batch">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+            <span>Batch</span>
+          </a>
+          <a href="/jobs" class="nav-link" data-page="jobs">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+            <span>Jobs</span>
+          </a>
+        </div>
+        <div class="nav-section">
+          <span class="nav-section-title">Review</span>
+          <a href="/review" class="nav-link" data-page="review">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg>
+            <span>Review</span>
+          </a>
+          <a href="/compare" class="nav-link" data-page="compare">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="2" x2="12" y2="22"/><path d="M17 12H3"/><path d="M21 12H17"/><polyline points="7 8 3 12 7 16"/><polyline points="17 8 21 12 17 16"/></svg>
+            <span>Compare</span>
+          </a>
+          <a href="/similarity" class="nav-link" data-page="similarity">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="9" cy="9" r="7"/><circle cx="15" cy="15" r="7"/></svg>
+            <span>Similarity</span>
+          </a>
+          <a href="/mockups" class="nav-link" data-page="mockups">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+            <span>Mockups</span>
+          </a>
+        </div>
+        <div class="nav-section">
+          <span class="nav-section-title">Insights</span>
+          <a href="/dashboard" class="nav-link" data-page="dashboard">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="21" x2="9" y2="9"/></svg>
+            <span>Dashboard</span>
+          </a>
+          <a href="/history" class="nav-link" data-page="history">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v5h5"/><path d="M3.05 13A9 9 0 1018 3.95L3 8"/></svg>
+            <span>History</span>
+          </a>
+          <a href="/analytics" class="nav-link" data-page="analytics">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+            <span>Analytics</span>
+          </a>
+        </div>
+        <div class="nav-section">
+          <span class="nav-section-title">Configure</span>
+          <a href="/catalogs" class="nav-link" data-page="catalogs">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 016.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z"/></svg>
+            <span>Catalogs</span>
+          </a>
+          <a href="/prompts" class="nav-link" data-page="prompts">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+            <span>Prompts</span>
+          </a>
+          <a href="/settings" class="nav-link" data-page="settings">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+            <span>Settings</span>
+          </a>
+          <a href="/api-docs" class="nav-link" data-page="api-docs">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+            <span>API Docs</span>
+          </a>
+        </div>
+      </nav>
+    </aside>
 
-<!-- ─── Header ─────────────────────────────────────────────────────────────── -->
-<header class="app-header">
-  <a class="logo" href="/">
-    <svg width="22" height="22" viewBox="0 0 22 22" fill="none" xmlns="http://www.w3.org/2000/svg">
-      <rect x="2" y="2" width="18" height="18" rx="3" stroke="currentColor" stroke-width="1.5"/>
-      <path d="M6 16L9 8l3 5 2-3 2 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-    </svg>
-    Alexandria
-    <span>Cover Designer</span>
-  </a>
-
-  <div class="header-right">
-    <div class="cost-badge">
-      <span>Today: <strong id="cost-today">—</strong></span>
-      <span>Session: <strong id="cost-session">$0.000</strong></span>
+    <!-- Main area -->
+    <div class="main-area">
+      <header class="top-header" id="topHeader">
+        <button class="mobile-menu-btn" id="mobileMenuBtn" aria-label="Open menu">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+        </button>
+        <h1 class="page-title" id="pageTitle">Iterate</h1>
+        <div class="header-actions">
+          <span class="budget-badge" id="budgetBadge" title="Budget spent">$0.00 spent</span>
+          <span class="sync-status" id="syncStatus" title="Catalog status">0 books</span>
+        </div>
+      </header>
+      <main class="content" id="content">
+        <!-- Pages render here -->
+      </main>
     </div>
   </div>
-</header>
 
-<!-- ─── Navigation ─────────────────────────────────────────────────────────── -->
-<nav class="app-nav">
-  <ul class="nav-list">
-    <li><a href="/iterate" class="active">Iterate</a></li>
-    <li><a href="/review">Review</a></li>
-    <li><a href="/batch">Batch</a></li>
-    <li><a href="/history">History</a></li>
-    <li><a href="/dashboard">Dashboard</a></li>
-    <li><a href="/prompts">Prompts</a></li>
-    <li><a href="/jobs">Jobs</a></li>
-    <li><a href="/compare">Compare</a></li>
-    <li><a href="/analytics">Analytics</a></li>
-    <li><a href="/similarity">Similarity</a></li>
-    <li><a href="/mockups">Mockups</a></li>
-    <li><a href="/catalogs">Catalogs</a></li>
-    <li><a href="/settings">Settings</a></li>
-    <li><a href="/api-docs">API Docs</a></li>
-  </ul>
-</nav>
+  <!-- Toast container -->
+  <div class="toast-container" id="toastContainer"></div>
 
-<!-- ─── Main layout ──────────────────────────────────────────────────────────── -->
-<div class="page-layout">
-
-  <!-- ─── Left panel ────────────────────────────────────────────────────────── -->
-  <aside class="left-panel">
-
-    <!-- Mode toggle -->
-    <div class="panel-section" style="border-bottom: none; padding-bottom: 8px;">
-      <div class="mode-toggle">
-        <button class="mode-btn active" data-mode="quick">Quick</button>
-        <button class="mode-btn" data-mode="advanced">Advanced</button>
-      </div>
-    </div>
-
-    <!-- Book selector -->
-    <div class="panel-section">
-      <h3>Book</h3>
-      <div class="form-group">
-        <select id="book-select" aria-label="Select book">
-          <option value="">Loading books…</option>
-        </select>
-      </div>
-      <div class="sync-status">
-        <div class="sync-dot syncing" id="sync-dot"></div>
-        <span id="sync-text">Connecting…</span>
-      </div>
-    </div>
-
-    <!-- Models -->
-    <div class="panel-section">
-      <h3>Models</h3>
-      <div id="models-container" class="checkbox-group">
-        <!-- Rendered by iterate.js -->
-        <div class="text-muted" style="font-size:0.8rem;">Loading…</div>
-      </div>
-    </div>
-
-    <!-- Variants (Advanced only) -->
-    <div class="panel-section hidden" id="variant-section">
-      <h3>Variants</h3>
-      <p class="text-muted" style="font-size:0.75rem;margin-bottom:10px;">
-        1–3: Sketch/Engraving &nbsp; 4: Oil Painting &nbsp; 5: Watercolor
-      </p>
-      <div class="variant-grid">
-        <button class="variant-btn selected" data-variant="1">1</button>
-        <button class="variant-btn selected" data-variant="2">2</button>
-        <button class="variant-btn selected" data-variant="3">3</button>
-        <button class="variant-btn" data-variant="4">4</button>
-        <button class="variant-btn" data-variant="5">5</button>
-      </div>
-    </div>
-
-    <!-- Prompt editor (Advanced only) -->
-    <div class="panel-section hidden" id="prompt-section">
-      <h3>Custom Prompt</h3>
-      <p class="text-muted" style="font-size:0.75rem;margin-bottom:8px;">
-        Leave blank to use auto-generated prompts.
-      </p>
-      <textarea id="prompt-editor" placeholder="Optional: override the generation prompt for all variants…" rows="5"></textarea>
-    </div>
-
-    <!-- Generate button -->
-    <div class="panel-section" style="border-top: 1px solid var(--border); margin-top: auto;">
-      <button id="generate-btn" class="btn btn-primary">
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-          <path d="M8 2v12M2 8h12" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
-        </svg>
-        Generate
-      </button>
-    </div>
-
-  </aside>
-
-  <!-- ─── Right panel ───────────────────────────────────────────────────────── -->
-  <main class="right-panel" id="right-panel">
-
-    <!-- Active jobs -->
-    <div id="active-jobs-panel" class="active-jobs-strip hidden">
-      <h4>In Progress</h4>
-      <div id="active-jobs-list"></div>
-    </div>
-
-    <!-- Results header -->
-    <div class="results-header">
-      <h2>Generated Covers</h2>
-      <span class="results-count" id="results-count"></span>
-    </div>
-
-    <!-- Results grid -->
-    <div class="results-grid" id="results-grid">
-      <!-- Empty state -->
-      <div class="empty-state">
-        <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
-          <rect x="8" y="8" width="32" height="32" rx="6" stroke="#9a9490" stroke-width="2"/>
-          <path d="M16 32l7-10 5 7 4-5 8 8" stroke="#9a9490" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-          <circle cx="18" cy="18" r="3" fill="#9a9490"/>
-        </svg>
-        <p>Select a book and click Generate to create AI illustrations for the cover medallion.</p>
-      </div>
-    </div>
-
-  </main>
-</div>
-
-<script src="/static/js/common.js"></script>
-<script src="/static/js/iterate.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+  <script src="/static/js/app.js"></script>
 </body>
 </html>

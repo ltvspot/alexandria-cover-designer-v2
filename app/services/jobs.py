@@ -32,10 +32,12 @@ from app.services.cost_tracker import track_cost
 from app.services.drive import ensure_cover_cached, make_thumbnail
 from app.services.generator import generate_image
 from app.services.compositor import composite, make_output_thumbnail
-from app.services.prompts import build_prompt
 from app.services.quality import score_image
 
 logger = logging.getLogger(__name__)
+
+RETRY_THRESHOLD = 0.35
+MAX_RETRIES = 2
 
 # ─── SSE event bus ─────────────────────────────────────────────────────────────
 # job_id → list of asyncio.Queue for SSE subscribers
@@ -65,6 +67,13 @@ def _emit(job_id: str, event: Dict[str, Any]) -> None:
             q.put_nowait(event)
         except asyncio.QueueFull:
             pass
+
+
+async def _heartbeat(job_id: str, interval: float = 5.0) -> None:
+    """Emit SSE heartbeat events every 5 seconds for the duration of a job."""
+    while True:
+        await asyncio.sleep(interval)
+        _emit(job_id, {"event": "heartbeat", "job_id": job_id})
 
 
 # ─── Job creation ─────────────────────────────────────────────────────────────
@@ -103,7 +112,7 @@ async def cancel_job(job_id: str) -> bool:
 # ─── Worker ───────────────────────────────────────────────────────────────────
 
 async def _process_job(job: Dict[str, Any]) -> None:
-    """Process a single job end-to-end."""
+    """Process a single job end-to-end with two-pass retry."""
     job_id = job["id"]
     book_id = job["book_id"]
     model = job["model"]
@@ -112,16 +121,19 @@ async def _process_job(job: Dict[str, Any]) -> None:
     await update_job(job_id, status="running", started_at=datetime.now(UTC).isoformat())
     _emit(job_id, {"event": "started", "job_id": job_id, "stage": "starting"})
 
+    # Start per-job heartbeat
+    heartbeat_task = asyncio.ensure_future(_heartbeat(job_id))
+
     try:
-        # ── Stage 1: Load book info ────────────────────────────────────────────
+        # ── Stage 1: Load book ────────────────────────────────────────────────
         from app.database import get_book
         book = await get_book(book_id)
         if not book:
             raise ValueError(f"Book {book_id} not found in database")
 
-        _emit(job_id, {"event": "progress", "stage": "downloading", "message": "Downloading source cover..."})
+        _emit(job_id, {"event": "progress", "stage": "cover", "message": "Downloading source cover..."})
 
-        # ── Stage 2: Ensure cover is cached ───────────────────────────────────
+        # ── Stage 2: Ensure cover is cached ──────────────────────────────────
         cover_path: Optional[Path] = None
         cached = book.get("cover_cached_path")
         if cached and Path(cached).exists() and Path(cached).stat().st_size > 10_000:
@@ -129,13 +141,11 @@ async def _process_job(job: Dict[str, Any]) -> None:
         elif book.get("cover_jpg_id"):
             cover_path = await ensure_cover_cached(book_id, book["cover_jpg_id"])
             if cover_path:
-                await update_job(job_id)  # no-op update just to refresh
                 from app.database import execute
                 await execute(
                     "UPDATE books SET cover_cached_path = ? WHERE id = ?",
                     (str(cover_path), book_id),
                 )
-                # Also make thumbnail
                 thumb = await make_thumbnail(cover_path, book_id)
                 if thumb:
                     await execute(
@@ -143,30 +153,73 @@ async def _process_job(job: Dict[str, Any]) -> None:
                         (str(thumb), book_id),
                     )
         else:
-            logger.warning("No cover_jpg_id for book %s — skipping Drive download", book_id)
+            logger.warning("No cover_jpg_id for book %s", book_id)
 
-        # ── Stage 3: Build prompt ─────────────────────────────────────────────
-        _emit(job_id, {"event": "progress", "stage": "generating", "message": "Generating illustration..."})
+        # ── Stage 3: Build prompt with style diversifier ──────────────────────
+        from app.services.prompts import select_diverse_styles, build_diversified_prompt
+        styles = select_diverse_styles(1)
+        style = styles[0]
 
-        prompt_text = job.get("prompt") or build_prompt(
+        prompt_text = job.get("prompt") or build_diversified_prompt(
             title=book["title"],
             author=book.get("author") or "",
-            variant=variant,
+            style=style,
         )
         await update_job(job_id, prompt=prompt_text)
 
-        # ── Stage 4: Generate image ────────────────────────────────────────────
-        result = await generate_image(
-            prompt=prompt_text,
-            model_id=model,
-            job_id=job_id,
-            variant=variant,
-        )
+        # ── Stage 4: Generate image — two-pass retry ──────────────────────────
+        _emit(job_id, {"event": "progress", "stage": "generating", "message": "Generating illustration..."})
 
-        if not result.success:
-            raise RuntimeError(f"Generation failed: {result.error}")
+        best_result = None
+        best_quality = -1.0
+        current_prompt = prompt_text
 
-        # ── Stage 5: Track cost ────────────────────────────────────────────────
+        for attempt in range(MAX_RETRIES + 1):
+            if attempt > 0:
+                current_prompt = (
+                    prompt_text
+                    + " IMPORTANT: The illustration MUST be a perfectly circular vignette with the "
+                    "subject centered. The edges of the circle should fade to empty space or a simple "
+                    "gradient. No content should touch the circular boundary."
+                )
+                _emit(job_id, {
+                    "event": "progress",
+                    "stage": "retrying",
+                    "message": f"Retry {attempt}/{MAX_RETRIES} — improving circular fit",
+                    "attempt": attempt,
+                })
+
+            result = await generate_image(
+                prompt=current_prompt,
+                model_id=model,
+                job_id=f"{job_id}_a{attempt}",
+                variant=variant,
+            )
+
+            if not result.success:
+                if attempt == MAX_RETRIES:
+                    raise RuntimeError(f"Generation failed after {MAX_RETRIES + 1} attempts: {result.error}")
+                logger.warning("Attempt %d failed: %s — retrying", attempt + 1, result.error)
+                continue
+
+            # Score this attempt
+            quality = score_image(result.image_bytes)
+            logger.info("Attempt %d quality=%.3f threshold=%.2f", attempt + 1, quality, RETRY_THRESHOLD)
+
+            if quality > best_quality:
+                best_quality = quality
+                best_result = result
+
+            if quality >= RETRY_THRESHOLD:
+                break  # Good enough — stop retrying
+
+        if best_result is None:
+            raise RuntimeError("All generation attempts failed")
+
+        result = best_result
+        quality = best_quality
+
+        # ── Stage 5: Track cost ───────────────────────────────────────────────
         await track_cost(
             model=model,
             cost_usd=result.cost_usd,
@@ -180,11 +233,12 @@ async def _process_job(job: Dict[str, Any]) -> None:
 
         # ── Stage 6: Composite ────────────────────────────────────────────────
         composited_path: Optional[Path] = None
+        composite_verified = False
+
         if cover_path and cover_path.exists():
             _emit(job_id, {"event": "progress", "stage": "compositing", "message": "Compositing illustration onto cover..."})
             try:
-                # Get medallion config (book-specific or defaults)
-                from app.config import MEDALLION_CENTER_X, MEDALLION_CENTER_Y, MEDALLION_RADIUS, MEDALLION_FEATHER
+                from app.config import MEDALLION_CENTER_X, MEDALLION_CENTER_Y, MEDALLION_RADIUS
                 from app.database import fetchone
                 med = await fetchone(
                     "SELECT * FROM medallion_config WHERE book_id = ?", (book_id,)
@@ -200,20 +254,16 @@ async def _process_job(job: Dict[str, Any]) -> None:
                     center_x=cx,
                     center_y=cy,
                     radius=r,
-                    feather=MEDALLION_FEATHER,
                 )
-                # Make thumbnail
                 make_output_thumbnail(composited_path, job_id)
+                composite_verified = True
+                _emit(job_id, {"event": "progress", "stage": "compositing", "message": "Composite verified"})
             except Exception as e:
                 logger.warning("Compositing failed (continuing without): %s", e)
         else:
-            logger.info("No source cover available — skipping compositing for job %s", job_id)
+            logger.info("No source cover — skipping compositing for job %s", job_id)
 
-        # ── Stage 7: Quality score ────────────────────────────────────────────
-        _emit(job_id, {"event": "progress", "stage": "scoring", "message": "Scoring quality..."})
-        quality = score_image(result.image_bytes)
-
-        # ── Stage 8: Finalise ─────────────────────────────────────────────────
+        # ── Stage 7: Finalise ─────────────────────────────────────────────────
         results = {
             "generated_raw_path": str(OUTPUTS_DIR / f"{job_id}_raw.{result.image_format}"),
             "composited_path": str(composited_path) if composited_path else None,
@@ -222,6 +272,9 @@ async def _process_job(job: Dict[str, Any]) -> None:
             "cost_usd": result.cost_usd,
             "duration_ms": result.duration_ms,
             "variant": variant,
+            "style_id": style.get("id"),
+            "style_label": style.get("label"),
+            "composite_verified": composite_verified,
         }
         await update_job(
             job_id,
@@ -237,6 +290,7 @@ async def _process_job(job: Dict[str, Any]) -> None:
             "quality_score": quality,
             "cost_usd": result.cost_usd,
             "composited": composited_path is not None,
+            "style_label": style.get("label"),
         })
         logger.info("Job %s completed (quality=%.3f, cost=$%.4f)", job_id, quality, result.cost_usd)
 
@@ -249,6 +303,12 @@ async def _process_job(job: Dict[str, Any]) -> None:
             completed_at=datetime.now(UTC).isoformat(),
         )
         _emit(job_id, {"event": "failed", "job_id": job_id, "error": str(e)})
+    finally:
+        heartbeat_task.cancel()
+        try:
+            await asyncio.wait_for(heartbeat_task, timeout=1.0)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
 
 
 # Semaphore to limit concurrency

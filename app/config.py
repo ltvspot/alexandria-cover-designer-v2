@@ -3,6 +3,7 @@ Configuration — all env vars and constants.
 Values are hardcoded as defaults, overridable by environment variables.
 """
 import os
+from collections import OrderedDict
 from pathlib import Path
 
 # ─── Paths ───────────────────────────────────────────────────────────────────
@@ -31,47 +32,135 @@ DRIVE_API_BASE = "https://www.googleapis.com/drive/v3"
 # ─── OpenRouter ───────────────────────────────────────────────────────────────
 OPENROUTER_API_KEY = os.environ.get(
     "OPENROUTER_API_KEY",
-    "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",
+    "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",
 )
 OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
 
 # ─── Models + Costs ──────────────────────────────────────────────────────────
-OPENROUTER_MODELS = {
-    "gemini-2.5-flash-image": {
-        "id": "google/gemini-2.5-flash-preview-05-20",
-        "openrouter_id": "google/gemini-2.5-flash-preview-05-20",
-        "cost_per_image": 0.003,
-        "label": "Gemini 2.5 Flash Image",
-        "best_for": "Cheap smoke tests",
-        "default": True,
-    },
-    "gemini-3-pro-image-preview": {
-        "id": "google/gemini-3-pro-image-preview",
-        "openrouter_id": "google/gemini-3-pro-image-preview",
-        "cost_per_image": 0.01,
-        "label": "Gemini 3 Pro Image Preview",
-        "best_for": "Good balance",
-        "default": True,
-    },
-    "gpt-5-image-mini": {
-        "id": "openai/gpt-5-image-mini",
-        "openrouter_id": "openai/gpt-5-image-mini",
-        "cost_per_image": 0.012,
-        "label": "GPT-5 Image Mini",
-        "best_for": "Conceptual compositions",
-        "default": True,
-    },
-    "gpt-5-image": {
+OPENROUTER_MODELS = OrderedDict([
+    ("gpt-5-image", {
         "id": "openai/gpt-5-image",
         "openrouter_id": "openai/gpt-5-image",
         "cost_per_image": 0.04,
         "label": "GPT-5 Image",
-        "best_for": "Premium quality",
+        "modality": "both",
         "default": False,
-    },
-}
+    }),
+    ("riverflow-v2-pro", {
+        "id": "sourceful/riverflow-v2-pro",
+        "openrouter_id": "sourceful/riverflow-v2-pro",
+        "cost_per_image": 0.15,
+        "label": "Riverflow V2 Pro",
+        "modality": "image",
+        "default": False,
+    }),
+    ("riverflow-v2-max-preview", {
+        "id": "sourceful/riverflow-v2-max-preview",
+        "openrouter_id": "sourceful/riverflow-v2-max-preview",
+        "cost_per_image": 0.075,
+        "label": "Riverflow V2 Max Preview",
+        "modality": "image",
+        "default": False,
+    }),
+    ("flux-2-max", {
+        "id": "black-forest-labs/flux.2-max",
+        "openrouter_id": "black-forest-labs/flux.2-max",
+        "cost_per_image": 0.07,
+        "label": "FLUX.2 Max",
+        "modality": "image",
+        "default": False,
+    }),
+    ("flux-2-flex", {
+        "id": "black-forest-labs/flux.2-flex",
+        "openrouter_id": "black-forest-labs/flux.2-flex",
+        "cost_per_image": 0.06,
+        "label": "FLUX.2 Flex",
+        "modality": "image",
+        "default": False,
+    }),
+    ("seedream-4.5", {
+        "id": "bytedance-seed/seedream-4.5",
+        "openrouter_id": "bytedance-seed/seedream-4.5",
+        "cost_per_image": 0.04,
+        "label": "Seedream 4.5",
+        "modality": "image",
+        "default": False,
+    }),
+    ("riverflow-v2-standard-preview", {
+        "id": "sourceful/riverflow-v2-standard-preview",
+        "openrouter_id": "sourceful/riverflow-v2-standard-preview",
+        "cost_per_image": 0.035,
+        "label": "Riverflow V2 Standard Preview",
+        "modality": "image",
+        "default": False,
+    }),
+    ("flux-2-pro", {
+        "id": "black-forest-labs/flux.2-pro",
+        "openrouter_id": "black-forest-labs/flux.2-pro",
+        "cost_per_image": 0.03,
+        "label": "FLUX.2 Pro",
+        "modality": "image",
+        "default": True,
+    }),
+    ("riverflow-v2-fast-preview", {
+        "id": "sourceful/riverflow-v2-fast-preview",
+        "openrouter_id": "sourceful/riverflow-v2-fast-preview",
+        "cost_per_image": 0.03,
+        "label": "Riverflow V2 Fast Preview",
+        "modality": "image",
+        "default": False,
+    }),
+    ("nano-banana-pro", {
+        "id": "google/gemini-3-pro-image-preview",
+        "openrouter_id": "google/gemini-3-pro-image-preview",
+        "cost_per_image": 0.01,
+        "label": "Nano Banana Pro",
+        "modality": "both",
+        "default": True,
+    }),
+    ("flux-2-klein", {
+        "id": "black-forest-labs/flux.2-klein-4b",
+        "openrouter_id": "black-forest-labs/flux.2-klein-4b",
+        "cost_per_image": 0.014,
+        "label": "FLUX.2 Klein",
+        "modality": "image",
+        "default": False,
+    }),
+    ("gpt-5-image-mini", {
+        "id": "openai/gpt-5-image-mini",
+        "openrouter_id": "openai/gpt-5-image-mini",
+        "cost_per_image": 0.012,
+        "label": "GPT-5 Image Mini",
+        "modality": "both",
+        "default": True,
+    }),
+    ("nano-banana-2", {
+        "id": "google/gemini-3.1-flash-image-preview",
+        "openrouter_id": "google/gemini-3.1-flash-image-preview",
+        "cost_per_image": 0.006,
+        "label": "Nano Banana 2",
+        "modality": "both",
+        "default": True,
+    }),
+    ("riverflow-v2-fast", {
+        "id": "sourceful/riverflow-v2-fast",
+        "openrouter_id": "sourceful/riverflow-v2-fast",
+        "cost_per_image": 0.04,
+        "label": "Riverflow V2 Fast",
+        "modality": "image",
+        "default": False,
+    }),
+    ("nano-banana", {
+        "id": "google/gemini-2.5-flash-image",
+        "openrouter_id": "google/gemini-2.5-flash-image",
+        "cost_per_image": 0.003,
+        "label": "Nano Banana",
+        "modality": "both",
+        "default": True,
+    }),
+])
 
-DEFAULT_MODEL = "gemini-2.5-flash-image"
+DEFAULT_MODEL = "nano-banana"
 
 # ─── Budget ───────────────────────────────────────────────────────────────────
 BUDGET_LIMIT_USD = float(os.environ.get("BUDGET_LIMIT_USD", "200.0"))
@@ -91,7 +180,7 @@ MEDALLION_FEATHER = 15  # px Gaussian blur on mask edge
 
 # ─── Job Worker ───────────────────────────────────────────────────────────────
 WORKER_POLL_INTERVAL = 1.0   # seconds between queue polls
-MAX_CONCURRENT_JOBS = 2
+MAX_CONCURRENT_JOBS = 5
 JOB_TIMEOUT_SECONDS = 300    # 5 min per job
 
 # ─── SSE ──────────────────────────────────────────────────────────────────────

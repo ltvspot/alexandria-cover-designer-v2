@@ -1,151 +1,133 @@
-"""
-Tests for image generation providers.
-"""
-import asyncio
-import base64
-import json
+"""Tests for OpenRouter provider — modality payloads and 429 retry."""
 import pytest
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from app.providers.base import GenerationResult
-from app.providers.openrouter import OpenRouterProvider, _decode_data_url
-from app.providers.registry import CircuitBreaker, ProviderRegistry
+from app.providers.openrouter import OpenRouterProvider, _extract_image_from_response
 
 
-# ─── _decode_data_url ─────────────────────────────────────────────────────────
-
-def test_decode_data_url_with_prefix():
-    raw = b"hello world"
-    encoded = base64.b64encode(raw).decode()
-    data_url = f"data:image/png;base64,{encoded}"
-    assert _decode_data_url(data_url) == raw
+def test_image_only_model_sends_image_modality():
+    """FLUX.2 Pro (image-only) must send modalities: ['image']."""
+    p = OpenRouterProvider()
+    assert p._get_modality("flux-2-pro") == "image"
 
 
-def test_decode_data_url_plain_base64():
-    raw = b"test bytes"
-    encoded = base64.b64encode(raw).decode()
-    assert _decode_data_url(encoded) == raw
+def test_both_model_sends_image_text_modality():
+    """Nano Banana (both) must send modalities: ['image', 'text']."""
+    p = OpenRouterProvider()
+    assert p._get_modality("nano-banana") == "both"
 
 
-# ─── CircuitBreaker ──────────────────────────────────────────────────────────
-
-def test_circuit_breaker_opens_after_threshold():
-    cb = CircuitBreaker(failure_threshold=3, reset_timeout=60)
-    assert not cb.is_open
-    cb.record_failure()
-    cb.record_failure()
-    assert not cb.is_open
-    cb.record_failure()
-    assert cb.is_open
+def test_nano_banana_pro_is_both():
+    p = OpenRouterProvider()
+    assert p._get_modality("nano-banana-pro") == "both"
 
 
-def test_circuit_breaker_resets_on_success():
-    cb = CircuitBreaker(failure_threshold=2, reset_timeout=60)
-    cb.record_failure()
-    cb.record_failure()
-    assert cb.is_open
-    # Simulate time passing by manually resetting
-    cb._opened_at = 0  # forces reset_timeout to expire
-    assert not cb.is_open  # auto-resets
-    cb.record_success()
-    assert cb._failures == 0
-
-
-def test_circuit_breaker_auto_resets_after_timeout():
-    import time
-    cb = CircuitBreaker(failure_threshold=2, reset_timeout=0.01)
-    cb.record_failure()
-    cb.record_failure()
-    assert cb.is_open
-    time.sleep(0.05)
-    assert not cb.is_open  # auto-reset after timeout
-
-
-# ─── OpenRouterProvider ──────────────────────────────────────────────────────
-
-@pytest.mark.asyncio
-async def test_openrouter_success():
-    """Test that a valid response is parsed correctly."""
-    provider = OpenRouterProvider(api_key="test-key")
-
-    # Build a minimal fake response
-    fake_png = base64.b64encode(b"\x89PNG\r\n").decode()
-    fake_resp = {
+def test_extract_image_format1():
+    """Format 1: choices[0].message.images[0].image_url.url"""
+    data = {
         "choices": [{
             "message": {
-                "content": "Here is your image.",
-                "images": [{
-                    "type": "image_url",
-                    "image_url": {"url": f"data:image/png;base64,{fake_png}"}
-                }]
-            }
-        }],
-        "usage": {"prompt_tokens": 50, "completion_tokens": 0},
-    }
-
-    with patch("httpx.AsyncClient") as mock_client_cls:
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status = MagicMock()
-        mock_resp.json = MagicMock(return_value=fake_resp)
-
-        mock_client = AsyncMock()
-        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
-        mock_client.__aexit__ = AsyncMock(return_value=False)
-        mock_client.post = AsyncMock(return_value=mock_resp)
-        mock_client_cls.return_value = mock_client
-
-        result = await provider.generate("Draw a cat", "gemini-2.5-flash-image")
-
-    assert result.success is True
-    assert result.image_bytes == base64.b64decode(fake_png)
-    assert result.image_format == "png"
-    assert result.model == "gemini-2.5-flash-image"
-
-
-@pytest.mark.asyncio
-async def test_openrouter_no_images_in_response():
-    provider = OpenRouterProvider(api_key="test-key")
-    fake_resp = {
-        "choices": [{
-            "message": {
-                "content": "I cannot generate images.",
-                "images": []
+                "images": [{"image_url": {"url": "data:image/png;base64,abc123"}}]
             }
         }]
     }
+    result = _extract_image_from_response(data)
+    assert result == "data:image/png;base64,abc123"
+
+
+def test_extract_image_format2():
+    """Format 2: content array with image_url type."""
+    data = {
+        "choices": [{
+            "message": {
+                "content": [
+                    {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,xyz"}}
+                ]
+            }
+        }]
+    }
+    result = _extract_image_from_response(data)
+    assert result == "data:image/jpeg;base64,xyz"
+
+
+def test_extract_image_format3():
+    """Format 3: inline_data type."""
+    data = {
+        "choices": [{
+            "message": {
+                "content": [
+                    {"inline_data": {"mime_type": "image/png", "data": "base64data"}}
+                ]
+            }
+        }]
+    }
+    result = _extract_image_from_response(data)
+    assert result == "data:image/png;base64,base64data"
+
+
+def test_extract_image_format4_string():
+    """Format 4: string content with embedded data URL."""
+    data = {
+        "choices": [{
+            "message": {
+                "content": "Here is your image: data:image/png;base64,AAABBBCCC123="
+            }
+        }]
+    }
+    result = _extract_image_from_response(data)
+    assert result == "data:image/png;base64,AAABBBCCC123="
+
+
+def test_extract_image_returns_none_on_empty():
+    """Returns None when no image found."""
+    data = {"choices": [{"message": {"content": "No image here"}}]}
+    result = _extract_image_from_response(data)
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_429_retry():
+    """429 response triggers retry with Retry-After backoff."""
+    p = OpenRouterProvider(api_key="test-key")
+
+    call_count = 0
+
+    class MockResponse:
+        status_code = 429
+        headers = {"Retry-After": "1"}
+        def raise_for_status(self): pass
+        def json(self): return {}
+
+    class SuccessResponse:
+        status_code = 200
+        headers = {}
+        def raise_for_status(self): pass
+        def json(self):
+            return {
+                "choices": [{
+                    "message": {
+                        "images": [{"image_url": {"url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="}}]
+                    }
+                }],
+                "usage": {}
+            }
+
+    async def mock_post(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count < 3:
+            return MockResponse()
+        return SuccessResponse()
 
     with patch("httpx.AsyncClient") as mock_client_cls:
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status = MagicMock()
-        mock_resp.json = MagicMock(return_value=fake_resp)
-
         mock_client = AsyncMock()
+        mock_client.post = mock_post
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
-        mock_client.post = AsyncMock(return_value=mock_resp)
         mock_client_cls.return_value = mock_client
 
-        result = await provider.generate("Draw a cat", "gemini-2.5-flash-image")
+        with patch("asyncio.sleep", new_callable=AsyncMock):
+            result = await p.generate("test prompt", "nano-banana")
 
-    assert result.success is False
-    assert "No images" in result.error
-
-
-def test_provider_not_available_without_key():
-    provider = OpenRouterProvider(api_key="")
-    assert not provider.is_available()
-
-
-# ─── ProviderRegistry ─────────────────────────────────────────────────────────
-
-def test_registry_get_provider():
-    reg = ProviderRegistry()
-    p = reg.get_provider("openrouter")
-    assert p is not None
-    assert p.name == "openrouter"
-
-
-def test_registry_unknown_provider():
-    reg = ProviderRegistry()
-    p = reg.get_provider("nonexistent")
-    assert p is None
+    assert call_count == 3  # Two 429s then success
