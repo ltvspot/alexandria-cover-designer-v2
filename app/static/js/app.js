@@ -319,7 +319,7 @@
       syncBtn.disabled = true;
       syncBtn.textContent = 'Syncing...';
       try {
-        const res = await API.post('/api/catalog/sync', {});
+        const res = await API.post('/api/catalogs/sync', {});
         window.Toast.success(`Catalog synced (${res.count || 0} books)`);
       } catch (err) {
         window.Toast.error(`Sync failed: ${err.message}`);
