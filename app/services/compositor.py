@@ -1,5 +1,5 @@
 """
-Compositor v6 — frame-first overlay pipeline (bleed-safe by construction).
+Compositor v7 — frame-first overlay pipeline (bleed-safe by construction).
 
 Why this exists:
 The ornamental medallion frame must remain intact. Prior geometric punch/clip
@@ -42,12 +42,30 @@ ILLUSTRATION_RATIO = 1.24
 PUNCH_RATIO = 1.26
 RING_WIDTH = 14
 
-# v6 constants
+# v7 constants
 OVERLAY_BASE_OUTER_RADIUS = 520.0
 OVERLAY_FILL_RATIO = 1.35
 OPENING_MASK_SAMPLES = 1080
 OPENING_MASK_SUPERSAMPLE = 4
-OPENING_MASK_SAFETY_PX = 0.0
+OPENING_MASK_SAFETY_PX = 10.0
+OVERLAY_CACHE_VERSION = "v7"
+
+# cached overlay sanity guardrails (reject stale/broken overlays)
+OVERLAY_MIN_AREA_FACTOR = 1.20
+OVERLAY_MAX_AREA_FACTOR = 3.80
+OVERLAY_CENTER_TOLERANCE_FACTOR = 0.18
+
+
+def _build_opening_mask(canvas_size: Tuple[int, int], cx: int, cy: int, outer_radius: int) -> Image.Image:
+    return _build_parametric_opening_mask(
+        canvas_size,
+        cx,
+        cy,
+        outer_radius,
+        samples=OPENING_MASK_SAMPLES,
+        supersample=OPENING_MASK_SUPERSAMPLE,
+        safety_px=OPENING_MASK_SAFETY_PX,
+    )
 
 
 def _find_energy_center(img: Image.Image) -> Tuple[float, float]:
@@ -224,7 +242,49 @@ def _build_cover_overlay(cover_rgba: Image.Image, opening_mask: Image.Image) -> 
 
 
 def _overlay_cache_path(cover_path: Path, center_x: int, center_y: int, radius: int) -> Path:
-    return OVERLAYS_DIR / f"{cover_path.stem}_cx{center_x}_cy{center_y}_r{radius}.png"
+    return OVERLAYS_DIR / f"{cover_path.stem}_cx{center_x}_cy{center_y}_r{radius}_{OVERLAY_CACHE_VERSION}.png"
+
+
+def _overlay_cache_looks_valid(overlay: Image.Image, cx: int, cy: int, radius: int) -> bool:
+    """Reject stale overlays with obviously broken transparent regions."""
+    if overlay.mode != "RGBA":
+        return False
+
+    alpha = np.array(overlay.split()[-1], dtype=np.uint8)
+    transparent = alpha < 16
+    area = int(transparent.sum())
+    if area <= 0:
+        return False
+
+    min_area = int(math.pi * (radius ** 2) * OVERLAY_MIN_AREA_FACTOR)
+    max_area = int(math.pi * (radius ** 2) * OVERLAY_MAX_AREA_FACTOR)
+    if area < min_area or area > max_area:
+        return False
+
+    ys, xs = np.where(transparent)
+    if xs.size == 0:
+        return False
+    cx_t = float(xs.mean())
+    cy_t = float(ys.mean())
+    tol = max(20.0, radius * OVERLAY_CENTER_TOLERANCE_FACTOR)
+    if abs(cx_t - cx) > tol or abs(cy_t - cy) > tol:
+        return False
+    return True
+
+
+def _flatten_generated_alpha(generated_rgba: Image.Image, bg_color: Tuple[int, int, int]) -> Image.Image:
+    """
+    Some providers return transparent PNG cutouts. Flatten onto the sampled
+    background color so the medallion area is always fully painted.
+    """
+    img = generated_rgba.convert("RGBA")
+    alpha = img.split()[-1]
+    mn, mx = alpha.getextrema()
+    if mn == 255 and mx == 255:
+        return img
+    bg = Image.new("RGBA", img.size, bg_color + (255,))
+    bg.alpha_composite(img)
+    return bg
 
 
 def _get_or_create_cover_overlay(
@@ -233,8 +293,10 @@ def _get_or_create_cover_overlay(
     center_x: int,
     center_y: int,
     radius: int,
+    opening_mask: Optional[Image.Image] = None,
 ) -> Image.Image:
-    opening_mask = _build_parametric_opening_mask(cover_rgba.size, center_x, center_y, radius)
+    if opening_mask is None:
+        opening_mask = _build_opening_mask(cover_rgba.size, center_x, center_y, radius)
     overlay = _build_cover_overlay(cover_rgba, opening_mask)
 
     if not cover_path:
@@ -245,8 +307,9 @@ def _get_or_create_cover_overlay(
         cache_path = _overlay_cache_path(cover_path, center_x, center_y, radius)
         if cache_path.exists():
             cached = Image.open(cache_path).convert("RGBA")
-            if cached.size == cover_rgba.size:
+            if cached.size == cover_rgba.size and _overlay_cache_looks_valid(cached, center_x, center_y, radius):
                 return cached
+            logger.warning("Overlay cache invalid, regenerating: %s", cache_path)
 
         overlay.save(cache_path, "PNG", optimize=True)
     except Exception as e:  # pragma: no cover
@@ -272,15 +335,19 @@ def _overlay_composite_image(
     bg_color = _sample_background_color(cover_rgba, center_x, center_y)
     result = Image.new("RGBA", (W, H), bg_color + (255,))
 
+    # Conservative opening mask (slightly inset from inner frame edge)
+    opening_mask = _build_opening_mask((W, H), center_x, center_y, radius)
+
+    generated_prepped = _flatten_generated_alpha(generated_rgba, bg_color)
     fill_radius = round(radius * OVERLAY_FILL_RATIO)
-    crop_center = _find_energy_center(generated_rgba)
-    generated_cropped = _smart_square_crop(generated_rgba, crop_center, fill_radius * 2)
+    crop_center = _find_energy_center(generated_prepped)
+    generated_cropped = _smart_square_crop(generated_prepped, crop_center, fill_radius * 2)
 
     gen_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     gen_layer.paste(generated_cropped, (center_x - fill_radius, center_y - fill_radius))
 
-    fill_mask = _make_circle_mask_full((W, H), center_x, center_y, fill_radius)
-    result = Image.composite(gen_layer, result, fill_mask)
+    # Clip generated layer exactly to opening mask.
+    result = Image.composite(gen_layer, result, opening_mask)
 
     # Layer B: original cover overlay with transparent opening
     overlay = _get_or_create_cover_overlay(
@@ -289,6 +356,7 @@ def _overlay_composite_image(
         center_x=center_x,
         center_y=center_y,
         radius=radius,
+        opening_mask=opening_mask,
     )
     result.alpha_composite(overlay)
 

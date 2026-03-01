@@ -6,10 +6,14 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from app.services.compositor import (
+    OVERLAY_CACHE_VERSION,
     OVERLAY_FILL_RATIO,
     _build_cover_overlay,
     _build_parametric_opening_mask,
+    _flatten_generated_alpha,
     _opening_radius,
+    _overlay_cache_looks_valid,
+    _overlay_cache_path,
     _overlay_composite_image,
     composite_v3,
 )
@@ -92,6 +96,30 @@ def test_overlay_composite_preserves_cover_outside_opening_exactly():
 
 def test_fill_ratio_is_generous():
     assert OVERLAY_FILL_RATIO >= 1.2
+
+
+def test_overlay_cache_path_is_versioned(tmp_path):
+    p = _overlay_cache_path(tmp_path / "cover.jpg", 2850, 1350, 520)
+    assert p.name.endswith(f"_{OVERLAY_CACHE_VERSION}.png")
+
+
+def test_overlay_cache_validation_rejects_broken_alpha():
+    w, h = 1200, 900
+    # broken/stale overlay: tiny transparent patch far from medallion center
+    bad = Image.new("RGBA", (w, h), (10, 10, 10, 255))
+    d = ImageDraw.Draw(bad)
+    d.rectangle((10, 10, 60, 60), fill=(10, 10, 10, 0))
+    assert _overlay_cache_looks_valid(bad, 850, 450, 220) is False
+
+
+def test_transparent_generated_image_is_flattened():
+    gen = Image.new("RGBA", (512, 512), (0, 0, 0, 0))
+    d = ImageDraw.Draw(gen)
+    d.ellipse((180, 180, 340, 340), fill=(240, 210, 120, 255))
+    flat = _flatten_generated_alpha(gen, (26, 39, 68))
+
+    alpha = np.array(flat.split()[-1])
+    assert alpha.min() == 255
 
 
 def test_composite_v3_output_size(tmp_path):
