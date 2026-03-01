@@ -393,7 +393,13 @@ def composite_v3(
     )
 
     result.convert("RGB").save(out_path, "JPEG", quality=95, dpi=(COVER_DPI, COVER_DPI))
-    logger.info("Compositor v6 saved: %s (%d bytes)", out_path, out_path.stat().st_size)
+    logger.info(
+        "Compositor v7 saved: %s (%d bytes, safety_px=%.1f, cache=%s)",
+        out_path,
+        out_path.stat().st_size,
+        OPENING_MASK_SAFETY_PX,
+        OVERLAY_CACHE_VERSION,
+    )
     return out_path
 
 
