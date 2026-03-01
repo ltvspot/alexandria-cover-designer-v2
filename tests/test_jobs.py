@@ -37,8 +37,9 @@ def test_max_retries():
 
 
 def test_artifact_penalty_retry_gate():
-    from app.services.jobs import MAX_ARTIFACT_PENALTY_ACCEPT
+    from app.services.jobs import MAX_ARTIFACT_PENALTY_ACCEPT, MAX_ARTIFACT_PENALTY_RETURN
     assert MAX_ARTIFACT_PENALTY_ACCEPT == 0.08
+    assert MAX_ARTIFACT_PENALTY_RETURN == 0.15
 
 
 def test_apply_generation_guardrails_appends_constraints_once():

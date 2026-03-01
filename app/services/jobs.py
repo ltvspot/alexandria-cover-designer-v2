@@ -39,6 +39,7 @@ logger = logging.getLogger(__name__)
 RETRY_THRESHOLD = 0.35
 MAX_RETRIES = 2
 MAX_ARTIFACT_PENALTY_ACCEPT = 0.08
+MAX_ARTIFACT_PENALTY_RETURN = 0.15
 RETRY_PROMPT_HARDENER = (
     "Retry directive: remove every form of text and typography from the artwork. "
     "No labels, words, initials, numbers, logos, banners, ribbons, seals, plaques, or signatures. "
@@ -196,6 +197,9 @@ async def _process_job(job: Dict[str, Any]) -> None:
 
         best_result = None
         best_quality = -1.0
+        best_artifact_penalty = 1.0
+        best_clean_result = None
+        best_clean_quality = -1.0
         current_prompt = prompt_text
 
         for attempt in range(MAX_RETRIES + 1):
@@ -242,6 +246,11 @@ async def _process_job(job: Dict[str, Any]) -> None:
             if quality > best_quality:
                 best_quality = quality
                 best_result = result
+                best_artifact_penalty = artifact_penalty
+
+            if artifact_penalty <= MAX_ARTIFACT_PENALTY_RETURN and quality > best_clean_quality:
+                best_clean_quality = quality
+                best_clean_result = result
 
             if quality >= RETRY_THRESHOLD and artifact_penalty <= MAX_ARTIFACT_PENALTY_ACCEPT:
                 break  # Good enough — stop retrying
@@ -249,8 +258,13 @@ async def _process_job(job: Dict[str, Any]) -> None:
         if best_result is None:
             raise RuntimeError("All generation attempts failed")
 
-        result = best_result
-        quality = best_quality
+        if best_clean_result is None:
+            raise RuntimeError(
+                f"All attempts contained text/frame artifacts (best artifact_penalty={best_artifact_penalty:.3f})"
+            )
+
+        result = best_clean_result
+        quality = best_clean_quality
 
         # ── Stage 5: Track cost ───────────────────────────────────────────────
         await track_cost(
