@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 RETRY_THRESHOLD = 0.35
 MAX_RETRIES = 2
 MAX_ARTIFACT_PENALTY_ACCEPT = 0.08
-MAX_ARTIFACT_PENALTY_RETURN = 0.15
+MAX_ARTIFACT_PENALTY_RETURN = 0.08
 RETRY_PROMPT_HARDENER = (
     "Retry directive: remove every form of text and typography from the artwork. "
     "No labels, words, initials, numbers, logos, banners, ribbons, seals, plaques, or signatures. "
