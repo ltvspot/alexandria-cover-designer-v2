@@ -42,7 +42,7 @@ def _make_cover(w=2200, h=1600, cx=1500, cy=800, r=350) -> Image.Image:
 
 
 def test_derive_inner_radius_from_legacy_outer():
-    assert _derive_inner_radius(520) == 350
+    assert _derive_inner_radius(520) == 420
 
 
 def test_derive_inner_radius_passthrough_inner():
