@@ -166,6 +166,21 @@ def _ornamental_frame_penalty(arr_rgb: np.ndarray) -> float:
     side_min = min(top_e, bot_e, left_e, right_e)
     side_avg = (top_e + bot_e + left_e + right_e) / 4.0
 
+    # Detect strong border lines around all four sides.
+    edge_mask = edge > np.percentile(edge, 90)
+    t_peak = float(edge_mask[:bw, :].mean(axis=1).max()) if bw > 0 else 0.0
+    b_peak = float(edge_mask[-bw:, :].mean(axis=1).max()) if bw > 0 else 0.0
+    l_peak = float(edge_mask[:, :bw].mean(axis=0).max()) if bw > 0 else 0.0
+    r_peak = float(edge_mask[:, -bw:].mean(axis=0).max()) if bw > 0 else 0.0
+    border_line_min = min(t_peak, b_peak, l_peak, r_peak)
+
+    if border_line_min > 0.22:
+        return 0.22
+    if border_line_min > 0.16:
+        return 0.12
+    if border_line_min > 0.12:
+        return 0.06
+
     if ratio > 1.75 and side_min > center_energy * 1.30:
         return 0.22
     if ratio > 1.45 and side_avg > center_energy * 1.15:
