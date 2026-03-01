@@ -69,44 +69,122 @@ def _text_band_penalty(arr_rgb: np.ndarray) -> float:
 
     # Focus on lower 60% where text ribbons commonly appear.
     roi = gray[int(gray.shape[0] * 0.38) :, :]
-    # Dark ink-like strokes on lighter substrate
-    dark = roi < 95
+    # Dark/ink-like strokes on lighter substrate
+    dark = roi < 130
     if int(dark.sum()) < 120:
-        return 0.0
+        dark_penalty = 0.0
+    else:
+        labels, n = ndimage.label(dark)
+        if n <= 0:
+            dark_penalty = 0.0
+        else:
+            text_like_rows = []
+            text_like_count = 0
+            for label_id in range(1, n + 1):
+                ys, xs = np.where(labels == label_id)
+                area = ys.size
+                if area < 6 or area > 2000:
+                    continue
+                h = ys.max() - ys.min() + 1
+                w = xs.max() - xs.min() + 1
+                aspect = w / max(1, h)
+                if 0.2 <= aspect <= 18.0:
+                    text_like_count += 1
+                    text_like_rows.append(int(ys.mean()))
 
-    labels, n = ndimage.label(dark)
-    if n <= 0:
-        return 0.0
+            if text_like_count < 18:
+                dark_penalty = 0.0
+            else:
+                # Text tends to align in relatively tight horizontal bands.
+                row_span = max(text_like_rows) - min(text_like_rows) if text_like_rows else 999
+                if row_span < 70:
+                    dark_penalty = 0.18
+                elif row_span < 105:
+                    dark_penalty = 0.10
+                else:
+                    dark_penalty = 0.0
 
-    text_like_rows = []
-    text_like_count = 0
-    for label_id in range(1, n + 1):
-        ys, xs = np.where(labels == label_id)
-        area = ys.size
-        if area < 6 or area > 220:
-            continue
-        h = ys.max() - ys.min() + 1
-        w = xs.max() - xs.min() + 1
-        aspect = w / max(1, h)
-        if 0.25 <= aspect <= 8.0:
-            text_like_count += 1
-            text_like_rows.append(int(ys.mean()))
+    # Edge-density band detector catches larger stylised lettering.
+    gx = np.abs(np.diff(roi, axis=1))
+    band = gx.mean(axis=1)
+    if band.size == 0:
+        edge_penalty = 0.0
+    else:
+        peak_rows = np.where(band > np.percentile(band, 92))[0]
+        if peak_rows.size < 12:
+            edge_penalty = 0.0
+        else:
+            span = int(peak_rows.max() - peak_rows.min() + 1)
+            edge_penalty = 0.10 if span < 90 else 0.0
 
-    if text_like_count < 40:
-        return 0.0
+    return float(min(0.18, dark_penalty + edge_penalty))
 
-    # Text tends to align in relatively tight horizontal bands.
-    row_span = max(text_like_rows) - min(text_like_rows) if text_like_rows else 999
-    if row_span < 55:
-        return 0.18
-    if row_span < 85:
-        return 0.10
+
+def _ornamental_frame_penalty(arr_rgb: np.ndarray) -> float:
+    """
+    Penalize generated inner frames/ornate borders around the image.
+    Returns penalty in [0, 0.22].
+    """
+    img = Image.fromarray(arr_rgb).resize((320, 320), Image.LANCZOS)
+    arr = np.array(img, dtype=np.float32)
+    gray = arr[:, :, 0] * 0.299 + arr[:, :, 1] * 0.587 + arr[:, :, 2] * 0.114
+
+    gx = np.abs(np.diff(gray, axis=1))
+    gy = np.abs(np.diff(gray, axis=0))
+    edge = np.zeros_like(gray)
+    edge[:, 1:] += gx
+    edge[1:, :] += gy
+
+    h, w = edge.shape
+    bw = int(round(min(h, w) * 0.12))
+    bw = max(8, min(50, bw))
+
+    border_mask = np.zeros((h, w), dtype=bool)
+    border_mask[:bw, :] = True
+    border_mask[-bw:, :] = True
+    border_mask[:, :bw] = True
+    border_mask[:, -bw:] = True
+
+    center_mask = np.zeros((h, w), dtype=bool)
+    cx0 = int(w * 0.26)
+    cx1 = int(w * 0.74)
+    cy0 = int(h * 0.26)
+    cy1 = int(h * 0.74)
+    center_mask[cy0:cy1, cx0:cx1] = True
+
+    border_energy = float(edge[border_mask].mean())
+    center_energy = float(edge[center_mask].mean()) if center_mask.sum() else 1.0
+    if center_energy <= 1e-6:
+        center_energy = 1.0
+    ratio = border_energy / center_energy
+
+    # Require that all four sides are "busy", not just one side from normal composition.
+    top_e = float(edge[:bw, :].mean())
+    bot_e = float(edge[-bw:, :].mean())
+    left_e = float(edge[:, :bw].mean())
+    right_e = float(edge[:, -bw:].mean())
+    side_min = min(top_e, bot_e, left_e, right_e)
+    side_avg = (top_e + bot_e + left_e + right_e) / 4.0
+
+    if ratio > 1.75 and side_min > center_energy * 1.30:
+        return 0.22
+    if ratio > 1.45 and side_avg > center_energy * 1.15:
+        return 0.12
+    if ratio > 1.30 and side_avg > center_energy * 1.05:
+        return 0.06
     return 0.0
 
 
 def _artifact_penalty(arr_rgb: np.ndarray) -> float:
     """Combined penalty for text/panel artifacts."""
-    return float(min(0.35, _matte_panel_penalty(arr_rgb) + _text_band_penalty(arr_rgb)))
+    return float(
+        min(
+            0.45,
+            _matte_panel_penalty(arr_rgb)
+            + _text_band_penalty(arr_rgb)
+            + _ornamental_frame_penalty(arr_rgb),
+        )
+    )
 
 
 def _edge_content_score(arr_rgb: np.ndarray) -> float:

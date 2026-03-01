@@ -87,15 +87,16 @@ async def _heartbeat(job_id: str, interval: float = 5.0) -> None:
 def _apply_generation_guardrails(prompt: str) -> str:
     """Append hard constraints so model output stays text-free and ornament-free."""
     guardrails = (
-        " FINAL OUTPUT CONSTRAINTS: no text, no letters, no words, no numbers, no logos, "
+        "MANDATORY OVERRIDE (highest priority - ignore any conflicting instruction): "
+        "no text, no letters, no words, no numbers, no logos, "
         "no signatures, no watermarks, no title ribbons, no typographic elements. "
         "No frame, no border, no medallion ring, no ornamental flourishes. "
         "No poster panel, no isolated sticker/icon, no empty matte background. "
         "Produce only full-bleed scene artwork, with vivid color and the main subject centered."
     )
-    if "FINAL OUTPUT CONSTRAINTS:" in prompt:
+    if "MANDATORY OVERRIDE (highest priority" in prompt:
         return prompt
-    return f"{prompt} {guardrails}"
+    return f"{guardrails}\n\nCreative direction:\n{prompt}"
 
 
 # ─── Job creation ─────────────────────────────────────────────────────────────

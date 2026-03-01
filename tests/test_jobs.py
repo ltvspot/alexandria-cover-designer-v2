@@ -48,7 +48,7 @@ def test_apply_generation_guardrails_appends_constraints_once():
     first = _apply_generation_guardrails(base)
     second = _apply_generation_guardrails(first)
 
-    assert "FINAL OUTPUT CONSTRAINTS:" in first
+    assert "MANDATORY OVERRIDE (highest priority" in first
     assert first == second
     assert "no text" in first.lower()
     assert "no frame" in first.lower()

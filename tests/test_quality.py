@@ -7,7 +7,7 @@ from io import BytesIO
 from app.services.quality import (
     score_image, get_detailed_scores,
     _edge_content_score, _center_of_mass_score, _circular_composition_score,
-    _legacy_color_scores, _artifact_penalty,
+    _legacy_color_scores, _artifact_penalty, _ornamental_frame_penalty,
 )
 
 
@@ -109,4 +109,21 @@ def test_artifact_penalty_detects_matte_side_panels():
     arr[:, :] = [230, 230, 230]  # light matte
     arr[20:200, 70:150] = [40, 90, 170]  # central panel
     penalty = _artifact_penalty(arr)
+    assert penalty > 0.05
+
+
+def test_ornamental_frame_penalty_detects_generated_border():
+    arr = np.full((260, 260, 3), 180, dtype=np.uint8)
+    arr[30:230, 30:230] = [90, 120, 160]  # inner scene
+    # Ornate-like busy border strokes
+    arr[:24, :] = [30, 30, 30]
+    arr[-24:, :] = [30, 30, 30]
+    arr[:, :24] = [30, 30, 30]
+    arr[:, -24:] = [30, 30, 30]
+    arr[8:22, 40:220:8] = [220, 180, 80]
+    arr[238:252, 40:220:8] = [220, 180, 80]
+    arr[40:220:8, 8:22] = [220, 180, 80]
+    arr[40:220:8, 238:252] = [220, 180, 80]
+
+    penalty = _ornamental_frame_penalty(arr)
     assert penalty > 0.05
