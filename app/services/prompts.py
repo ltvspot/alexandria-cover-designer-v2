@@ -5,6 +5,26 @@ Exact port of style-diversifier.js + static client prompt logic.
 import random
 from typing import Dict, List
 
+# Global art-direction guardrails to prevent text plaques, fake medallion rings,
+# and decorative overlays inside model output.
+STRICT_CONTENT_GUARDRAILS = (
+    "IMPORTANT OUTPUT RULES: generate pure full-bleed scene artwork only. "
+    "Absolutely no text, letters, words, numbers, logos, signatures, watermarks, "
+    "book titles, author names, typographic labels, calligraphy, banners, ribbons, "
+    "seals, plaques, crests, or cartouches. "
+    "Do not add any border, frame, medallion ring, filigree, ornamental surround, "
+    "or decorative edge treatment. "
+    "No poster layout, no rectangular panel, no isolated sticker/icon, no empty background matte. "
+    "Artwork should extend edge-to-edge with visual detail across the canvas. "
+    "The compositor will handle all framing."
+)
+
+VIVID_COLOR_DIRECTION = (
+    "Use an attention-grabbing, bestseller-grade palette with rich saturation, "
+    "luminous highlights, strong color contrast, and cinematic depth, while staying "
+    "tasteful and period-appropriate for a classic literary edition."
+)
+
 # ─── Style Pool — 16 entries, exact from style-diversifier.js ────────────────
 STYLE_POOL: List[Dict] = [
     {
@@ -169,6 +189,13 @@ STYLE_POOL: List[Dict] = [
     },
 ]
 
+for _style in STYLE_POOL:
+    if "no typography" not in _style["modifier"].lower():
+        _style["modifier"] += (
+            " Keep the output purely pictorial: no typography, no labels, no banners, "
+            "no medallion border, and no decorative frame elements."
+        )
+
 
 def select_diverse_styles(count: int) -> List[Dict]:
     """
@@ -190,14 +217,16 @@ def build_diversified_prompt(title: str, author: str, style: Dict) -> str:
     """
     author_part = f" by {author}" if author else ""
     return (
-        f'Create a beautiful, highly detailed illustration for the classic book "{title}"{author_part}. '
+        f"Create a beautiful, highly detailed illustration inspired by the narrative of {title}{author_part}. "
         f"First, identify the most iconic scene, character, or symbolic element of this specific story. "
-        f"Then depict that scene as a richly detailed circular medallion illustration suitable for a "
-        f"luxury book cover. The artwork should capture the essence of what makes this particular book "
+        f"Then depict that scene as a richly detailed full-bleed rectangular scene illustration for a "
+        f"luxury classic book cover. The artwork should capture the essence of what makes this particular book "
         f"memorable — its setting, its emotional core, its most dramatic or beautiful moment. "
         f"{style['modifier']} "
-        f"The composition must be a circular vignette with the subject centred and fully contained "
-        f"within the circle, edges fading softly into empty space."
+        f"{VIVID_COLOR_DIRECTION} "
+        f"The composition should keep the primary subject clearly centered with safe margins so circle-cropping "
+        f"preserves key details. "
+        f"{STRICT_CONTENT_GUARDRAILS}"
     )
 
 

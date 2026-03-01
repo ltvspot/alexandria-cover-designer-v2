@@ -34,3 +34,21 @@ def test_max_retries():
     """MAX_RETRIES must be 2 (matching static client JobQueue.MAX_RETRIES)."""
     from app.services.jobs import MAX_RETRIES
     assert MAX_RETRIES == 2
+
+
+def test_artifact_penalty_retry_gate():
+    from app.services.jobs import MAX_ARTIFACT_PENALTY_ACCEPT
+    assert MAX_ARTIFACT_PENALTY_ACCEPT == 0.08
+
+
+def test_apply_generation_guardrails_appends_constraints_once():
+    from app.services.jobs import _apply_generation_guardrails
+
+    base = "Create a dramatic scene of Moby Dick."
+    first = _apply_generation_guardrails(base)
+    second = _apply_generation_guardrails(first)
+
+    assert "FINAL OUTPUT CONSTRAINTS:" in first
+    assert first == second
+    assert "no text" in first.lower()
+    assert "no frame" in first.lower()

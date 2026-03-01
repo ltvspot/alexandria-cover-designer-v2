@@ -7,7 +7,7 @@ from io import BytesIO
 from app.services.quality import (
     score_image, get_detailed_scores,
     _edge_content_score, _center_of_mass_score, _circular_composition_score,
-    _legacy_color_scores,
+    _legacy_color_scores, _artifact_penalty,
 )
 
 
@@ -102,3 +102,11 @@ def test_legacy_scores_keys():
     assert set(scores.keys()) == {"color_score", "brightness_score", "contrast_score", "diversity_score"}
     for v in scores.values():
         assert 0.0 <= v <= 1.0
+
+
+def test_artifact_penalty_detects_matte_side_panels():
+    arr = np.zeros((220, 220, 3), dtype=np.uint8)
+    arr[:, :] = [230, 230, 230]  # light matte
+    arr[20:200, 70:150] = [40, 90, 170]  # central panel
+    penalty = _artifact_penalty(arr)
+    assert penalty > 0.05

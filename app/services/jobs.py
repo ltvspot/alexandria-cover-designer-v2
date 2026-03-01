@@ -32,12 +32,20 @@ from app.services.cost_tracker import track_cost
 from app.services.drive import ensure_cover_cached, make_thumbnail
 from app.services.generator import generate_image
 from app.services.compositor import composite, make_output_thumbnail
-from app.services.quality import score_image
+from app.services.quality import get_detailed_scores, score_image
 
 logger = logging.getLogger(__name__)
 
 RETRY_THRESHOLD = 0.35
 MAX_RETRIES = 2
+MAX_ARTIFACT_PENALTY_ACCEPT = 0.08
+RETRY_PROMPT_HARDENER = (
+    "Retry directive: remove every form of text and typography from the artwork. "
+    "No labels, words, initials, numbers, logos, banners, ribbons, seals, plaques, or signatures. "
+    "No decorative frame, ring, border, filigree, medallion, or ornamental surround. "
+    "No poster panel, no sticker icon, no empty matte background. "
+    "Return only vivid, colorful, full-bleed, center-focused scene artwork with strong contrast."
+)
 
 # ─── SSE event bus ─────────────────────────────────────────────────────────────
 # job_id → list of asyncio.Queue for SSE subscribers
@@ -74,6 +82,20 @@ async def _heartbeat(job_id: str, interval: float = 5.0) -> None:
     while True:
         await asyncio.sleep(interval)
         _emit(job_id, {"event": "heartbeat", "job_id": job_id})
+
+
+def _apply_generation_guardrails(prompt: str) -> str:
+    """Append hard constraints so model output stays text-free and ornament-free."""
+    guardrails = (
+        " FINAL OUTPUT CONSTRAINTS: no text, no letters, no words, no numbers, no logos, "
+        "no signatures, no watermarks, no title ribbons, no typographic elements. "
+        "No frame, no border, no medallion ring, no ornamental flourishes. "
+        "No poster panel, no isolated sticker/icon, no empty matte background. "
+        "Produce only full-bleed scene artwork, with vivid color and the main subject centered."
+    )
+    if "FINAL OUTPUT CONSTRAINTS:" in prompt:
+        return prompt
+    return f"{prompt} {guardrails}"
 
 
 # ─── Job creation ─────────────────────────────────────────────────────────────
@@ -165,6 +187,7 @@ async def _process_job(job: Dict[str, Any]) -> None:
             author=book.get("author") or "",
             style=style,
         )
+        prompt_text = _apply_generation_guardrails(prompt_text)
         await update_job(job_id, prompt=prompt_text)
 
         # ── Stage 4: Generate image — two-pass retry ──────────────────────────
@@ -178,14 +201,13 @@ async def _process_job(job: Dict[str, Any]) -> None:
             if attempt > 0:
                 current_prompt = (
                     prompt_text
-                    + " IMPORTANT: The illustration MUST be a perfectly circular vignette with the "
-                    "subject centered. The edges of the circle should fade to empty space or a simple "
-                    "gradient. No content should touch the circular boundary."
+                    + " "
+                    + RETRY_PROMPT_HARDENER
                 )
                 _emit(job_id, {
                     "event": "progress",
                     "stage": "retrying",
-                    "message": f"Retry {attempt}/{MAX_RETRIES} — improving circular fit",
+                    "message": f"Retry {attempt}/{MAX_RETRIES} — removing text and strengthening composition",
                     "attempt": attempt,
                 })
 
@@ -203,14 +225,24 @@ async def _process_job(job: Dict[str, Any]) -> None:
                 continue
 
             # Score this attempt
-            quality = score_image(result.image_bytes)
-            logger.info("Attempt %d quality=%.3f threshold=%.2f", attempt + 1, quality, RETRY_THRESHOLD)
+            quality_details = get_detailed_scores(result.image_bytes)
+            quality = float(quality_details.get("overall", score_image(result.image_bytes)))
+            artifact_penalty = float(
+                quality_details.get("artifact_penalty", {}).get("score", 0.0)
+            )
+            logger.info(
+                "Attempt %d quality=%.3f threshold=%.2f artifact_penalty=%.3f",
+                attempt + 1,
+                quality,
+                RETRY_THRESHOLD,
+                artifact_penalty,
+            )
 
             if quality > best_quality:
                 best_quality = quality
                 best_result = result
 
-            if quality >= RETRY_THRESHOLD:
+            if quality >= RETRY_THRESHOLD and artifact_penalty <= MAX_ARTIFACT_PENALTY_ACCEPT:
                 break  # Good enough — stop retrying
 
         if best_result is None:

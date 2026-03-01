@@ -22,8 +22,91 @@ except Exception:  # pragma: no cover
     cv2 = None
 import numpy as np
 from PIL import Image
+try:
+    from scipy import ndimage
+except Exception:  # pragma: no cover
+    ndimage = None
 
 logger = logging.getLogger(__name__)
+
+
+def _matte_panel_penalty(arr_rgb: np.ndarray) -> float:
+    """
+    Penalize poster/sticker outputs with large uniform side mattes.
+    Returns penalty in [0, 0.20].
+    """
+    h, w = arr_rgb.shape[:2]
+    if h < 30 or w < 30:
+        return 0.0
+
+    bw = max(6, int(round(w * 0.10)))
+    left = arr_rgb[:, :bw, :].astype(np.float32)
+    right = arr_rgb[:, w - bw :, :].astype(np.float32)
+
+    left_std = float(left.std())
+    right_std = float(right.std())
+    left_b = float((left[:, :, 0] * 0.299 + left[:, :, 1] * 0.587 + left[:, :, 2] * 0.114).mean())
+    right_b = float((right[:, :, 0] * 0.299 + right[:, :, 1] * 0.587 + right[:, :, 2] * 0.114).mean())
+
+    if left_std < 14.0 and right_std < 14.0 and left_b > 150.0 and right_b > 150.0:
+        return 0.20
+    if left_std < 20.0 and right_std < 20.0 and left_b > 130.0 and right_b > 130.0:
+        return 0.10
+    return 0.0
+
+
+def _text_band_penalty(arr_rgb: np.ndarray) -> float:
+    """
+    Heuristic penalty for line-like typography clusters (e.g. title ribbons).
+    Returns penalty in [0, 0.18].
+    """
+    if ndimage is None:
+        return 0.0
+
+    img = Image.fromarray(arr_rgb).resize((320, 320), Image.LANCZOS)
+    arr = np.array(img, dtype=np.uint8)
+    gray = (arr[:, :, 0] * 0.299 + arr[:, :, 1] * 0.587 + arr[:, :, 2] * 0.114).astype(np.float32)
+
+    # Focus on lower 60% where text ribbons commonly appear.
+    roi = gray[int(gray.shape[0] * 0.38) :, :]
+    # Dark ink-like strokes on lighter substrate
+    dark = roi < 95
+    if int(dark.sum()) < 120:
+        return 0.0
+
+    labels, n = ndimage.label(dark)
+    if n <= 0:
+        return 0.0
+
+    text_like_rows = []
+    text_like_count = 0
+    for label_id in range(1, n + 1):
+        ys, xs = np.where(labels == label_id)
+        area = ys.size
+        if area < 6 or area > 220:
+            continue
+        h = ys.max() - ys.min() + 1
+        w = xs.max() - xs.min() + 1
+        aspect = w / max(1, h)
+        if 0.25 <= aspect <= 8.0:
+            text_like_count += 1
+            text_like_rows.append(int(ys.mean()))
+
+    if text_like_count < 40:
+        return 0.0
+
+    # Text tends to align in relatively tight horizontal bands.
+    row_span = max(text_like_rows) - min(text_like_rows) if text_like_rows else 999
+    if row_span < 55:
+        return 0.18
+    if row_span < 85:
+        return 0.10
+    return 0.0
+
+
+def _artifact_penalty(arr_rgb: np.ndarray) -> float:
+    """Combined penalty for text/panel artifacts."""
+    return float(min(0.35, _matte_panel_penalty(arr_rgb) + _text_band_penalty(arr_rgb)))
 
 
 def _edge_content_score(arr_rgb: np.ndarray) -> float:
@@ -196,6 +279,7 @@ def score_image(image_bytes: bytes) -> float:
         com_score = _center_of_mass_score(arr)
         cc_score  = _circular_composition_score(arr)
         legacy    = _legacy_color_scores(arr)
+        penalty = _artifact_penalty(arr)
 
         final_score = (
             ec_score                          * 0.25
@@ -206,12 +290,13 @@ def score_image(image_bytes: bytes) -> float:
             + legacy["contrast_score"]        * 0.08
             + legacy["diversity_score"]       * 0.07
         )
+        final_score *= (1.0 - penalty)
         final_score = round(min(1.0, max(0.0, final_score)), 4)
         logger.debug(
-            "Quality score=%.4f (ec=%.3f com=%.3f cc=%.3f col=%.3f bri=%.3f con=%.3f div=%.3f)",
+            "Quality score=%.4f (ec=%.3f com=%.3f cc=%.3f col=%.3f bri=%.3f con=%.3f div=%.3f penalty=%.3f)",
             final_score, ec_score, com_score, cc_score,
             legacy["color_score"], legacy["brightness_score"],
-            legacy["contrast_score"], legacy["diversity_score"],
+            legacy["contrast_score"], legacy["diversity_score"], penalty,
         )
         return final_score
     except Exception as e:
@@ -230,12 +315,13 @@ def get_detailed_scores(image_bytes: bytes) -> Dict:
         com_score = _center_of_mass_score(arr)
         cc_score  = _circular_composition_score(arr)
         legacy    = _legacy_color_scores(arr)
+        penalty = _artifact_penalty(arr)
 
-        overall = round(min(1.0, max(0.0,
+        overall = round(min(1.0, max(0.0, (
             ec_score * 0.25 + com_score * 0.20 + cc_score * 0.20
             + legacy["color_score"] * 0.12 + legacy["brightness_score"] * 0.08
             + legacy["contrast_score"] * 0.08 + legacy["diversity_score"] * 0.07
-        )), 4)
+        ) * (1.0 - penalty))), 4)
 
         return {
             "overall": overall,
@@ -246,6 +332,7 @@ def get_detailed_scores(image_bytes: bytes) -> Dict:
             "brightness":            {"score": legacy["brightness_score"],  "weight": 0.08},
             "contrast":              {"score": legacy["contrast_score"],    "weight": 0.08},
             "diversity":             {"score": legacy["diversity_score"],   "weight": 0.07},
+            "artifact_penalty":      {"score": penalty,                     "weight": 0.00},
         }
     except Exception as e:
         logger.warning("Detailed scoring failed: %s", e)

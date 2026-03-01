@@ -741,6 +741,20 @@ async def batches_list():
 
 # ─── Prompts ──────────────────────────────────────────────────────────────────
 
+BUILTIN_TEMPLATE_GUARDRAIL = (
+    " IMPORTANT: output pure full-bleed scene artwork only. "
+    "Do NOT include any text, letters, words, numbers, title ribbons, nameplates, logos, signatures, "
+    "watermarks, seals, plaques, or banners. "
+    "Do NOT include decorative frames, medallion rings, borders, filigree, or ornamental surrounds. "
+    "Do NOT return poster panels, isolated stickers/icons, or empty matte backgrounds. "
+    "Keep the central subject bold, colorful, and fully visual."
+)
+
+BUILTIN_NEGATIVE_GUARDRAIL = (
+    "text, letters, words, typography, title, author name, logo, watermark, signature, "
+    "ribbon, plaque, banner, seal, border, frame, medallion, ornamental filigree"
+)
+
 BUILTIN_PROMPTS_V2 = [
     {
         "name": "Sevastopol / Dramatic Conflict",
@@ -896,6 +910,17 @@ BUILTIN_PROMPTS_V2 = [
     },
 ]
 
+for _p in BUILTIN_PROMPTS_V2:
+    _p["template"] = _p["template"].replace(
+        "circular vignette",
+        "full-bleed composition with centered subject and crop-safe margins",
+    )
+    if BUILTIN_TEMPLATE_GUARDRAIL not in _p["template"]:
+        _p["template"] = _p["template"] + BUILTIN_TEMPLATE_GUARDRAIL
+    neg = _p.get("negative_prompt", "")
+    if BUILTIN_NEGATIVE_GUARDRAIL not in neg:
+        _p["negative_prompt"] = (neg + ", " + BUILTIN_NEGATIVE_GUARDRAIL).strip(", ")
+
 
 @router.get("/prompts")
 async def prompts_list(category: Optional[str] = Query(None)):
@@ -907,16 +932,20 @@ async def prompts_list(category: Optional[str] = Query(None)):
 
 @router.post("/prompts/seed-builtins")
 async def seed_builtin_prompts():
-    """Seed the 10 v2 built-in prompt templates."""
-    seeded = 0
+    """Upsert the 10 v2 built-in prompt templates with strict no-text guardrails."""
+    created = 0
+    updated = 0
     for p in BUILTIN_PROMPTS_V2:
-        existing = await fetchall(
+        existing = await fetchone(
             "SELECT id FROM prompts WHERE name = ?", (p["name"],)
         )
-        if not existing:
+        if existing:
+            await update_prompt(existing["id"], p)
+            updated += 1
+        else:
             await create_prompt(p)
-            seeded += 1
-    return {"seeded": seeded, "total": len(BUILTIN_PROMPTS_V2)}
+            created += 1
+    return {"created": created, "updated": updated, "total": len(BUILTIN_PROMPTS_V2)}
 
 
 @router.get("/prompts/{prompt_id}")
