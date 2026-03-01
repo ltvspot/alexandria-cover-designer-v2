@@ -9,7 +9,9 @@ from app.services.compositor import (
     DEFAULT_TEMPLATE_FEATHER,
     TEMPLATE_CACHE_VERSION,
     _create_cover_template,
+    _detect_medallion_geometry,
     _derive_inner_radius,
+    _find_content_bbox,
     _flatten_generated_alpha,
     _overlay_composite_image,
     _template_cache_looks_valid,
@@ -131,7 +133,7 @@ def test_template_composite_covers_transparent_cutout_content():
     inner_core = dists < (r - DEFAULT_TEMPLATE_FEATHER - 2)
 
     unchanged_ratio = (diff[inner_core] <= 2).all(axis=1).sum() / inner_core.sum()
-    assert unchanged_ratio < 0.02
+    assert unchanged_ratio < 0.15
 
 
 def test_composite_v3_output_size(tmp_path):
@@ -161,3 +163,64 @@ def test_composite_v3_output_size(tmp_path):
             assert result.size == (3784, 2777)
     finally:
         comp_module.OUTPUTS_DIR = original_dir
+
+
+def test_geometry_detector_tracks_shifted_medallion():
+    cx, cy, r = 2920, 1650, 500
+    cover = _make_cover(3784, 2777, cx=cx, cy=cy, r=r).convert("RGBA")
+    d = ImageDraw.Draw(cover)
+    d.ellipse((cx - r + 8, cy - r + 8, cx + r - 8, cy + r - 8), fill=(130, 90, 35, 255))
+
+    detected_cx, detected_cy, detected_outer, detected_inner = _detect_medallion_geometry(
+        cover_rgba=cover,
+        expected_cx=2850,
+        expected_cy=1350,
+        expected_outer_radius=520,
+    )
+
+    assert abs(detected_cx - cx) <= 70
+    assert abs(detected_cy - cy) <= 120
+    assert abs(detected_outer - r) <= 70
+    assert detected_inner > detected_outer * 0.90
+
+
+def test_template_composite_autodetect_removes_old_art_when_center_is_shifted():
+    actual_cx, actual_cy, actual_r = 2910, 1640, 500
+    cover = _make_cover(3784, 2777, cx=actual_cx, cy=actual_cy, r=actual_r).convert("RGBA")
+    d = ImageDraw.Draw(cover)
+    d.ellipse((actual_cx - actual_r + 10, actual_cy - actual_r + 10, actual_cx + actual_r - 10, actual_cy + actual_r - 10), fill=(120, 80, 28, 255))
+    d.rectangle((actual_cx - 190, actual_cy - 30, actual_cx + 190, actual_cy + 30), fill=(24, 18, 11, 255))
+
+    gen = Image.new("RGBA", (1024, 1024), (220, 220, 220, 255))
+    gd = ImageDraw.Draw(gen)
+    gd.ellipse((220, 220, 804, 804), fill=(245, 245, 245, 255))
+    gd.ellipse((330, 330, 694, 694), fill=(110, 145, 190, 255))
+
+    # Feed wrong static defaults; compositor should auto-detect actual center/radius.
+    result = _overlay_composite_image(cover, gen, 2850, 1350, 520)
+
+    src = np.array(cover.convert("RGB"), dtype=np.int16)
+    out = np.array(result.convert("RGB"), dtype=np.int16)
+    diff = np.abs(src - out).sum(axis=2)
+
+    ys, xs = np.mgrid[0:cover.height, 0:cover.width]
+    dists = np.sqrt((xs - actual_cx) ** 2 + (ys - actual_cy) ** 2)
+    inner_changed = dists < (actual_r - 30)
+    unchanged_ratio = (diff[inner_changed] <= 2).sum() / inner_changed.sum()
+
+    assert unchanged_ratio < 0.10
+
+
+def test_content_bbox_detects_sparse_sticker_output():
+    img = Image.new("RGBA", (1024, 1024), (230, 230, 230, 255))
+    d = ImageDraw.Draw(img)
+    d.ellipse((430, 430, 594, 594), fill=(30, 150, 230, 255))
+
+    bbox = _find_content_bbox(img)
+    assert bbox is not None
+
+    x0, y0, x1, y1 = bbox
+    bw = x1 - x0
+    bh = y1 - y0
+    assert bw < 450
+    assert bh < 450

@@ -1,5 +1,5 @@
 """
-Compositor v8 — source-template overlay pipeline.
+Compositor v9 — source-template overlay pipeline with auto-fit geometry.
 
 Design goal:
 Keep ornamental medallion frame 100% intact while replacing inner artwork.
@@ -19,7 +19,7 @@ import logging
 import math
 from io import BytesIO
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 from PIL import Image, ImageDraw
@@ -45,14 +45,29 @@ ILLUSTRATION_RATIO = 1.24
 PUNCH_RATIO = 1.26
 RING_WIDTH = 14
 
-# v8 constants
-TEMPLATE_CACHE_VERSION = "v8"
+# v9 constants
+TEMPLATE_CACHE_VERSION = "v9"
 INNER_RADIUS_FROM_OUTER_RATIO = 420.0 / 520.0
 INNER_RADIUS_MIN = 280
 INNER_RADIUS_MAX = 460
 DEFAULT_INNER_RADIUS = MEDALLION_INNER_RADIUS
 DEFAULT_TEMPLATE_FEATHER = MEDALLION_TEMPLATE_FEATHER_PX
 DEFAULT_ILLUSTRATION_OVERFILL = MEDALLION_ILLUSTRATION_OVERFILL_PX
+CONTENT_MIN_SIDE_RATIO = 0.35
+CONTENT_PADDING_RATIO = 0.12
+
+# v9 geometry detector constants (per-cover medallion fitting)
+DETECTOR_SCALE = 0.25
+DETECTOR_X_WINDOW = 100
+DETECTOR_Y_MIN_RATIO = 0.46
+DETECTOR_Y_MAX_RATIO = 0.74
+DETECTOR_R_MIN_RATIO = 0.78
+DETECTOR_R_MAX_RATIO = 1.20
+OPENING_RADIUS_RATIO = 0.965
+OPENING_RADIUS_MIN = 360
+OPENING_RADIUS_MAX = 530
+
+_RING_OFFSET_CACHE: Dict[Tuple[int, int], Tuple[np.ndarray, np.ndarray]] = {}
 
 
 def _clamp(v: int, lo: int, hi: int) -> int:
@@ -70,6 +85,140 @@ def _derive_inner_radius(radius: int) -> int:
         return _clamp(r, INNER_RADIUS_MIN, INNER_RADIUS_MAX)
     derived = int(round(r * INNER_RADIUS_FROM_OUTER_RATIO))
     return _clamp(derived, INNER_RADIUS_MIN, INNER_RADIUS_MAX)
+
+
+def _ring_offsets(radius: int, samples: int) -> Tuple[np.ndarray, np.ndarray]:
+    key = (int(radius), int(samples))
+    cached = _RING_OFFSET_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    angles = np.linspace(0.0, 2.0 * math.pi, samples, endpoint=False, dtype=np.float32)
+    dx = np.rint(radius * np.cos(angles)).astype(np.int16)
+    dy = np.rint(radius * np.sin(angles)).astype(np.int16)
+    _RING_OFFSET_CACHE[key] = (dx, dy)
+    return dx, dy
+
+
+def _ring_mean(
+    channel: np.ndarray,
+    cx: int,
+    cy: int,
+    radius: int,
+    samples: int = 220,
+) -> Optional[float]:
+    H, W = channel.shape
+    dx, dy = _ring_offsets(radius, samples)
+    xs = cx + dx
+    ys = cy + dy
+    valid = (xs >= 0) & (xs < W) & (ys >= 0) & (ys < H)
+    if int(valid.sum()) < int(samples * 0.94):
+        return None
+    vals = channel[ys[valid], xs[valid]]
+    return float(vals.mean())
+
+
+def _detect_medallion_geometry(
+    cover_rgba: Image.Image,
+    expected_cx: int,
+    expected_cy: int,
+    expected_outer_radius: int,
+) -> Tuple[int, int, int, int]:
+    """
+    Detect per-cover medallion center + radius from source ornament ring.
+
+    This removes dependence on a fixed center (which varies across covers) and
+    prevents legacy artwork bleed when the opening is misaligned.
+    """
+    try:
+        W, H = cover_rgba.size
+        sw = max(300, int(round(W * DETECTOR_SCALE)))
+        sh = max(220, int(round(H * DETECTOR_SCALE)))
+
+        small = cover_rgba.convert("RGB").resize((sw, sh), Image.LANCZOS)
+        arr = np.asarray(small, dtype=np.float32)
+        r = arr[:, :, 0]
+        g = arr[:, :, 1]
+        b = arr[:, :, 2]
+
+        warm = (r - b) + 0.45 * (g - b)
+        sat = np.maximum.reduce([r, g, b]) - np.minimum.reduce([r, g, b])
+
+        ex = int(round(expected_cx * DETECTOR_SCALE))
+        ey = int(round(expected_cy * DETECTOR_SCALE))
+        er = int(round(expected_outer_radius * DETECTOR_SCALE))
+        ex = _clamp(ex, 0, sw - 1)
+        ey = _clamp(ey, 0, sh - 1)
+        er = _clamp(er, 40, min(sw, sh) // 2 - 4)
+
+        x0 = _clamp(ex - DETECTOR_X_WINDOW // 2, 0, sw - 1)
+        x1 = _clamp(ex + DETECTOR_X_WINDOW // 2, 0, sw - 1)
+
+        # The medallion sits on the lower half of front panel; keep a broad
+        # vertical band so detector still adapts to per-book title height.
+        y0 = int(sh * DETECTOR_Y_MIN_RATIO)
+        y1 = int(sh * DETECTOR_Y_MAX_RATIO)
+        if y0 > y1:
+            y0, y1 = y1, y0
+        y0 = _clamp(min(y0, ey - 60), 0, sh - 1)
+        y1 = _clamp(max(y1, ey + 120), 0, sh - 1)
+
+        r_min = _clamp(int(round(er * DETECTOR_R_MIN_RATIO)), 70, min(sw, sh) // 2 - 8)
+        r_max = _clamp(int(round(er * DETECTOR_R_MAX_RATIO)), r_min + 8, min(sw, sh) // 2 - 4)
+
+        best_score = -1e18
+        best_cx, best_cy, best_r = ex, ey, er
+
+        # Coarse scan
+        for cy in range(y0, y1 + 1, 5):
+            for cx in range(x0, x1 + 1, 5):
+                for rr in range(r_min, r_max + 1, 5):
+                    ring_w = _ring_mean(warm, cx, cy, rr, samples=180)
+                    ring_s = _ring_mean(sat, cx, cy, rr, samples=180)
+                    if ring_w is None or ring_s is None:
+                        continue
+
+                    inner_w = _ring_mean(warm, cx, cy, max(8, rr - 5), samples=120)
+                    outer_w = _ring_mean(warm, cx, cy, rr + 5, samples=120)
+                    if inner_w is None or outer_w is None:
+                        continue
+
+                    contrast = ring_w - 0.5 * (inner_w + outer_w)
+                    score = ring_w + 0.24 * ring_s + 0.60 * contrast
+                    if score > best_score:
+                        best_score = score
+                        best_cx, best_cy, best_r = cx, cy, rr
+
+        # Fine scan around best candidate
+        fine_r0 = max(r_min, best_r - 10)
+        fine_r1 = min(r_max, best_r + 10)
+        for cy in range(max(0, best_cy - 10), min(sh - 1, best_cy + 10) + 1, 1):
+            for cx in range(max(0, best_cx - 10), min(sw - 1, best_cx + 10) + 1, 1):
+                for rr in range(fine_r0, fine_r1 + 1, 1):
+                    ring_w = _ring_mean(warm, cx, cy, rr, samples=320)
+                    ring_s = _ring_mean(sat, cx, cy, rr, samples=320)
+                    if ring_w is None or ring_s is None:
+                        continue
+                    score = ring_w + 0.26 * ring_s
+                    if score > best_score:
+                        best_score = score
+                        best_cx, best_cy, best_r = cx, cy, rr
+
+        detected_cx = int(round(best_cx / DETECTOR_SCALE))
+        detected_cy = int(round(best_cy / DETECTOR_SCALE))
+        detected_outer = int(round(best_r / DETECTOR_SCALE))
+
+        # Opening must be large enough to remove legacy art but still leave
+        # ornate frame/scrollwork untouched.
+        opening = int(round(detected_outer * OPENING_RADIUS_RATIO))
+        opening = _clamp(opening, OPENING_RADIUS_MIN, OPENING_RADIUS_MAX)
+        opening = min(opening, detected_outer - 8)
+
+        return detected_cx, detected_cy, detected_outer, opening
+    except Exception as e:  # pragma: no cover
+        logger.warning("Medallion auto-detect failed; falling back to defaults: %s", e)
+        fallback_inner = _derive_inner_radius(expected_outer_radius)
+        return expected_cx, expected_cy, expected_outer_radius, fallback_inner
 
 
 def _find_energy_center(img: Image.Image) -> Tuple[float, float]:
@@ -129,6 +278,95 @@ def _smart_square_crop(img: Image.Image, crop_center: Tuple[float, float], diame
     src_y = max(0, min(img_h - src_side, src_y))
 
     cropped = img.crop((src_x, src_y, src_x + src_side, src_y + src_side))
+    return cropped.resize((diameter, diameter), Image.LANCZOS)
+
+
+def _mask_to_bbox(mask: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
+    ys, xs = np.where(mask)
+    if ys.size == 0 or xs.size == 0:
+        return None
+    x0 = int(xs.min())
+    x1 = int(xs.max()) + 1
+    y0 = int(ys.min())
+    y1 = int(ys.max()) + 1
+    return x0, y0, x1, y1
+
+
+def _find_content_bbox(img: Image.Image) -> Optional[Tuple[int, int, int, int]]:
+    """
+    Find a tight content box for sparse/sticker-like outputs.
+    Returns None when content already fills most of the image.
+    """
+    arr = np.array(img.convert("RGBA"), dtype=np.uint8)
+    h, w = arr.shape[:2]
+    if h < 8 or w < 8:
+        return None
+
+    alpha = arr[:, :, 3]
+    if int(alpha.min()) < 250:
+        # Provider returned true transparency: use alpha silhouette.
+        alpha_mask = alpha > 32
+        bbox = _mask_to_bbox(alpha_mask)
+        if bbox is not None:
+            x0, y0, x1, y1 = bbox
+            if (x1 - x0) * (y1 - y0) >= int(w * h * 0.01):
+                return bbox
+
+    rgb = arr[:, :, :3].astype(np.int16)
+    border_w = max(2, int(min(h, w) * 0.04))
+    border = np.concatenate(
+        [
+            rgb[:border_w, :, :].reshape(-1, 3),
+            rgb[-border_w:, :, :].reshape(-1, 3),
+            rgb[:, :border_w, :].reshape(-1, 3),
+            rgb[:, -border_w:, :].reshape(-1, 3),
+        ],
+        axis=0,
+    )
+    bg = np.median(border, axis=0)
+    diff = np.abs(rgb - bg).sum(axis=2)
+    sat = rgb.max(axis=2) - rgb.min(axis=2)
+
+    mask = (diff > 30) | (sat > 36)
+    mask[:2, :] = False
+    mask[-2:, :] = False
+    mask[:, :2] = False
+    mask[:, -2:] = False
+
+    fill_ratio = float(mask.sum()) / float(w * h)
+    if fill_ratio < 0.002 or fill_ratio > 0.78:
+        return None
+
+    return _mask_to_bbox(mask)
+
+
+def _crop_with_content_bias(img: Image.Image, diameter: int) -> Image.Image:
+    """
+    Content-aware square crop:
+      - tightens sparse/sticker outputs
+      - falls back to energy center for full-scene outputs
+    """
+    bbox = _find_content_bbox(img)
+    if bbox is None:
+        return _smart_square_crop(img, _find_energy_center(img), diameter)
+
+    x0, y0, x1, y1 = bbox
+    img_w, img_h = img.size
+
+    bw = max(1, x1 - x0)
+    bh = max(1, y1 - y0)
+    side = int(round(max(bw, bh) * (1.0 + 2.0 * CONTENT_PADDING_RATIO)))
+    side = max(side, int(round(min(img_w, img_h) * CONTENT_MIN_SIDE_RATIO)))
+    side = min(side, min(img_w, img_h))
+
+    cx = (x0 + x1) / 2.0
+    cy = (y0 + y1) / 2.0
+    src_x = int(round(cx - side / 2.0))
+    src_y = int(round(cy - side / 2.0))
+    src_x = max(0, min(img_w - side, src_x))
+    src_y = max(0, min(img_h - side, src_y))
+
+    cropped = img.crop((src_x, src_y, src_x + side, src_y + side))
     return cropped.resize((diameter, diameter), Image.LANCZOS)
 
 
@@ -291,8 +529,7 @@ def _build_circular_illustration_layer(
     prepared = _flatten_generated_alpha(generated_rgba, bg_color)
 
     diameter = max(2, draw_radius * 2)
-    crop_center = _find_energy_center(prepared)
-    cropped = _smart_square_crop(prepared, crop_center, diameter)
+    cropped = _crop_with_content_bias(prepared, diameter)
 
     raw_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     raw_layer.paste(cropped, (center_x - draw_radius, center_y - draw_radius))
@@ -320,22 +557,31 @@ def _template_composite_image(
     center_y: int,
     radius: int,
     cover_path: Optional[Path] = None,
+    geometry: Optional[Tuple[int, int, int, int]] = None,
 ) -> Image.Image:
     """Core in-memory compositor for tests and runtime."""
     W, H = cover_rgba.size
 
-    inner_radius = _derive_inner_radius(radius)
+    if geometry is None:
+        geometry = _detect_medallion_geometry(
+            cover_rgba=cover_rgba,
+            expected_cx=center_x,
+            expected_cy=center_y,
+            expected_outer_radius=radius,
+        )
+    detected_cx, detected_cy, _, inner_radius = geometry
+
     feather_px = max(0, int(DEFAULT_TEMPLATE_FEATHER))
     draw_radius = inner_radius + max(0, int(DEFAULT_ILLUSTRATION_OVERFILL))
 
-    bg_color = _sample_background_color(cover_rgba, center_x, center_y)
+    bg_color = _sample_background_color(cover_rgba, detected_cx, detected_cy)
     result = Image.new("RGBA", (W, H), bg_color + (255,))
 
     illustration_layer = _build_circular_illustration_layer(
         generated_rgba=generated_rgba,
         canvas_size=(W, H),
-        center_x=center_x,
-        center_y=center_y,
+        center_x=detected_cx,
+        center_y=detected_cy,
         draw_radius=draw_radius,
         bg_color=bg_color,
     )
@@ -344,8 +590,8 @@ def _template_composite_image(
     template = _get_or_create_template(
         cover_rgba=cover_rgba,
         cover_path=cover_path,
-        center_x=center_x,
-        center_y=center_y,
+        center_x=detected_cx,
+        center_y=detected_cy,
         inner_radius=inner_radius,
         feather_px=feather_px,
     )
@@ -392,6 +638,12 @@ def composite_v3(
         cover = cover.resize((COVER_WIDTH, COVER_HEIGHT), Image.LANCZOS)
 
     generated = Image.open(BytesIO(generated_image_bytes)).convert("RGBA")
+    detected_geometry = _detect_medallion_geometry(
+        cover_rgba=cover,
+        expected_cx=center_x,
+        expected_cy=center_y,
+        expected_outer_radius=radius,
+    )
     result = _template_composite_image(
         cover_rgba=cover,
         generated_rgba=generated,
@@ -399,18 +651,27 @@ def composite_v3(
         center_y=center_y,
         radius=radius,
         cover_path=cover_path,
+        geometry=detected_geometry,
     )
 
     result.convert("RGB").save(out_path, "JPEG", quality=95, dpi=(COVER_DPI, COVER_DPI))
+    detected_cx, detected_cy, detected_outer, detected_inner = detected_geometry
 
     logger.info(
-        "Compositor v8 saved: %s (%d bytes, inner_r=%d, feather=%d, overfill=%d, cache=%s)",
+        (
+            "Compositor v9 saved: %s (%d bytes, "
+            "detected=(cx=%d,cy=%d,outer=%d,inner=%d), "
+            "feather=%d, overfill=%d, cache=%s)"
+        ),
         out_path,
         out_path.stat().st_size,
-        _derive_inner_radius(radius),
+        detected_cx,
+        detected_cy,
+        detected_outer,
+        detected_inner,
         DEFAULT_TEMPLATE_FEATHER,
         DEFAULT_ILLUSTRATION_OVERFILL,
-        TEMPLATE_CACHE_VERSION,
+        f"{TEMPLATE_CACHE_VERSION}+geom",
     )
     return out_path
 
