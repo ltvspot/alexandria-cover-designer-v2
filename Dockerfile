@@ -15,7 +15,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Ensure data directories exist (Railway volumes may override these)
-RUN mkdir -p data/covers data/outputs data/thumbnails data/overlays
+RUN mkdir -p data/covers data/outputs data/thumbnails data/overlays data/templates
 
 EXPOSE 8080
 

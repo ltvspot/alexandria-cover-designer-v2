@@ -13,6 +13,7 @@ COVERS_DIR = DATA_DIR / "covers"
 OUTPUTS_DIR = DATA_DIR / "outputs"
 THUMBNAILS_DIR = DATA_DIR / "thumbnails"
 OVERLAYS_DIR = DATA_DIR / "overlays"
+TEMPLATES_DIR = DATA_DIR / "templates"
 DB_PATH = DATA_DIR / "app.db"
 
 # ─── Google Drive ─────────────────────────────────────────────────────────────
@@ -178,6 +179,9 @@ MEDALLION_CENTER_X = int(os.environ.get("MEDALLION_CENTER_X", "2850"))
 MEDALLION_CENTER_Y = int(os.environ.get("MEDALLION_CENTER_Y", "1350"))
 MEDALLION_RADIUS = int(os.environ.get("MEDALLION_RADIUS", "520"))
 MEDALLION_FEATHER = 15  # px Gaussian blur on mask edge
+MEDALLION_INNER_RADIUS = int(os.environ.get("MEDALLION_INNER_RADIUS", "350"))
+MEDALLION_TEMPLATE_FEATHER_PX = int(os.environ.get("MEDALLION_TEMPLATE_FEATHER_PX", "8"))
+MEDALLION_ILLUSTRATION_OVERFILL_PX = int(os.environ.get("MEDALLION_ILLUSTRATION_OVERFILL_PX", "10"))
 
 # ─── Job Worker ───────────────────────────────────────────────────────────────
 WORKER_POLL_INTERVAL = 1.0   # seconds between queue polls

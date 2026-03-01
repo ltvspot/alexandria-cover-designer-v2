@@ -1,16 +1,16 @@
 """
-Compositor v7 — frame-first overlay pipeline (bleed-safe by construction).
+Compositor v8 — source-template overlay pipeline.
 
-Why this exists:
-The ornamental medallion frame must remain intact. Prior geometric punch/clip
-approaches can drift and let generated art bleed into scrollwork.
+Design goal:
+Keep ornamental medallion frame 100% intact while replacing inner artwork.
 
-New pipeline:
-  1) Render generated artwork on a background layer.
-  2) Build an RGBA overlay from the original cover where the medallion opening is transparent.
-  3) Composite overlay on top of generated layer.
+Pipeline:
+  1) Build or load a per-cover RGBA template with a transparent medallion center.
+  2) Render generated illustration behind template on a navy background.
+  3) Alpha-composite the template on top.
 
-Because frame pixels are literally drawn on top, artwork cannot overlap ornaments.
+Because frame pixels are topmost opaque pixels from the source cover,
+illustration bleed over scrollwork is prevented by construction.
 """
 
 from __future__ import annotations
@@ -30,48 +30,50 @@ from app.config import (
     COVER_WIDTH,
     MEDALLION_CENTER_X,
     MEDALLION_CENTER_Y,
+    MEDALLION_ILLUSTRATION_OVERFILL_PX,
+    MEDALLION_INNER_RADIUS,
     MEDALLION_RADIUS,
-    OVERLAYS_DIR,
+    MEDALLION_TEMPLATE_FEATHER_PX,
     OUTPUTS_DIR,
+    TEMPLATES_DIR,
 )
 
 logger = logging.getLogger(__name__)
 
-# Back-compat constants (legacy compositor versions referenced these names)
+# Back-compat constants (legacy callers/tests reference these names)
 ILLUSTRATION_RATIO = 1.24
 PUNCH_RATIO = 1.26
 RING_WIDTH = 14
 
-# v7 constants
-OVERLAY_BASE_OUTER_RADIUS = 520.0
-OVERLAY_FILL_RATIO = 1.35
-OPENING_MASK_SAMPLES = 1080
-OPENING_MASK_SUPERSAMPLE = 4
-OPENING_MASK_SAFETY_PX = 10.0
-OVERLAY_CACHE_VERSION = "v7"
-
-# cached overlay sanity guardrails (reject stale/broken overlays)
-OVERLAY_MIN_AREA_FACTOR = 1.20
-OVERLAY_MAX_AREA_FACTOR = 3.80
-OVERLAY_CENTER_TOLERANCE_FACTOR = 0.18
+# v8 constants
+TEMPLATE_CACHE_VERSION = "v8"
+INNER_RADIUS_FROM_OUTER_RATIO = 350.0 / 520.0
+INNER_RADIUS_MIN = 320
+INNER_RADIUS_MAX = 380
+DEFAULT_INNER_RADIUS = MEDALLION_INNER_RADIUS
+DEFAULT_TEMPLATE_FEATHER = MEDALLION_TEMPLATE_FEATHER_PX
+DEFAULT_ILLUSTRATION_OVERFILL = MEDALLION_ILLUSTRATION_OVERFILL_PX
 
 
-def _build_opening_mask(canvas_size: Tuple[int, int], cx: int, cy: int, outer_radius: int) -> Image.Image:
-    return _build_parametric_opening_mask(
-        canvas_size,
-        cx,
-        cy,
-        outer_radius,
-        samples=OPENING_MASK_SAMPLES,
-        supersample=OPENING_MASK_SUPERSAMPLE,
-        safety_px=OPENING_MASK_SAFETY_PX,
-    )
+def _clamp(v: int, lo: int, hi: int) -> int:
+    return max(lo, min(hi, v))
+
+
+def _derive_inner_radius(radius: int) -> int:
+    """
+    Backwards compatibility:
+    - Historical pipeline passed outer medallion radius (~520)
+    - Template pipeline needs inner opening radius (~350)
+    """
+    r = int(radius)
+    if r <= INNER_RADIUS_MAX:
+        return _clamp(r, INNER_RADIUS_MIN, INNER_RADIUS_MAX)
+    derived = int(round(r * INNER_RADIUS_FROM_OUTER_RATIO))
+    return _clamp(derived, INNER_RADIUS_MIN, INNER_RADIUS_MAX)
 
 
 def _find_energy_center(img: Image.Image) -> Tuple[float, float]:
-    """
-    Compute detail center from gradient-energy center of mass (normalized 0..1).
-    """
+    """Compute detail center from gradient-energy center of mass (normalized 0..1)."""
     size = 150
     small = img.convert("RGB").resize((size, size), Image.LANCZOS)
     arr = np.array(small, dtype=np.float32)
@@ -113,9 +115,7 @@ def _find_energy_center(img: Image.Image) -> Tuple[float, float]:
 
 
 def _smart_square_crop(img: Image.Image, crop_center: Tuple[float, float], diameter: int) -> Image.Image:
-    """
-    Center on energy hotspot, crop to square, resize to diameter×diameter.
-    """
+    """Center on energy hotspot, crop to square, resize to diameter x diameter."""
     cx_norm, cy_norm = crop_center
     cx_norm = max(0.2, min(0.8, cx_norm))
     cy_norm = max(0.2, min(0.8, cy_norm))
@@ -133,9 +133,7 @@ def _smart_square_crop(img: Image.Image, crop_center: Tuple[float, float], diame
 
 
 def _sample_background_color(cover: Image.Image, cx: int, cy: int) -> Tuple[int, int, int]:
-    """
-    Sample a navy-like background color around the medallion region.
-    """
+    """Sample a navy-like background color around medallion region."""
     size = 100
     W, H = cover.size
     small = cover.convert("RGB").resize((size, size), Image.LANCZOS)
@@ -162,162 +160,201 @@ def _sample_background_color(cover: Image.Image, cx: int, cy: int) -> Tuple[int,
     return (r, g, b)
 
 
-def _make_circle_mask_full(canvas_size: Tuple[int, int], cx: int, cy: int, radius: int) -> Image.Image:
-    mask = Image.new("L", canvas_size, 0)
-    draw = ImageDraw.Draw(mask)
-    draw.ellipse([cx - radius, cy - radius, cx + radius, cy + radius], fill=255)
-    return mask
-
-
-def _angle_delta(a: float, b: float) -> float:
-    """Smallest signed angular difference a-b in [-pi, pi]."""
-    return (a - b + math.pi) % (2 * math.pi) - math.pi
-
-
-def _opening_radius(theta: float, outer_radius: float) -> float:
-    """
-    Parametric opening model from the bleeding report appendix.
-    Scaled to the current detected medallion outer radius.
-    """
-    s = outer_radius / OVERLAY_BASE_OUTER_RADIUS
-
-    d_top = _angle_delta(theta, 3 * math.pi / 2)
-    d_bottom = _angle_delta(theta, math.pi / 2)
-    d_right = _angle_delta(theta, 0.0)
-    d_left = _angle_delta(theta, math.pi)
-
-    r = (
-        420.0
-        - 70.0 * math.exp(-(d_top * d_top) / 0.09)
-        + 30.0 * math.exp(-(d_bottom * d_bottom) / 0.16)
-        - 15.0 * math.exp(-(d_right * d_right) / 0.04)
-        - 15.0 * math.exp(-(d_left * d_left) / 0.04)
-        - 15.0 * math.cos(2.0 * theta)
-    )
-    return max(220.0 * s, r * s)
-
-
-def _build_parametric_opening_mask(
+def _build_template_alpha(
     canvas_size: Tuple[int, int],
     cx: int,
     cy: int,
-    outer_radius: int,
-    samples: int = OPENING_MASK_SAMPLES,
-    supersample: int = OPENING_MASK_SUPERSAMPLE,
-    safety_px: float = OPENING_MASK_SAFETY_PX,
-) -> Image.Image:
+    inner_radius: int,
+    feather_px: int,
+) -> np.ndarray:
     """
-    Build an anti-aliased alpha mask for the medallion opening.
-    White (255) = opening area where generated art should remain visible.
+    Build template alpha where center is transparent and outside is opaque.
+
+    Uses a narrow feather transition around inner radius to avoid hard seams.
     """
     W, H = canvas_size
-    ss = max(1, int(supersample))
-    mask_hr = Image.new("L", (W * ss, H * ss), 0)
-    draw_hr = ImageDraw.Draw(mask_hr)
+    ys, xs = np.mgrid[0:H, 0:W]
+    dists = np.sqrt((xs - cx) ** 2 + (ys - cy) ** 2)
 
-    pts = []
-    for i in range(samples):
-        theta = (2.0 * math.pi * i) / samples
-        r = max(1.0, _opening_radius(theta, float(outer_radius)) - float(safety_px))
-        x = cx + r * math.cos(theta)
-        y = cy + r * math.sin(theta)
-        pts.append((x * ss, y * ss))
+    alpha = np.ones((H, W), dtype=np.float32)
+    f = max(0, int(feather_px))
+    inner = max(1, int(inner_radius))
 
-    draw_hr.polygon(pts, fill=255)
+    if f == 0:
+        alpha[dists < inner] = 0.0
+    else:
+        alpha[dists < (inner - f)] = 0.0
+        band = (dists >= (inner - f)) & (dists <= (inner + f))
+        alpha[band] = np.clip((dists[band] - (inner - f)) / (2.0 * f), 0.0, 1.0)
 
-    if ss > 1:
-        return mask_hr.resize((W, H), Image.LANCZOS)
-    return mask_hr
+    return (alpha * 255.0).astype(np.uint8)
 
 
-def _build_cover_overlay(cover_rgba: Image.Image, opening_mask: Image.Image) -> Image.Image:
-    """
-    Return RGBA overlay where the opening is transparent and everything else is opaque cover pixels.
-    """
-    overlay = cover_rgba.copy().convert("RGBA")
-    # opening_mask: 255 inside opening, 0 outside
-    alpha = Image.eval(opening_mask, lambda p: 255 - p)
-    overlay.putalpha(alpha)
-    return overlay
+def _create_cover_template(
+    cover_rgba: Image.Image,
+    cx: int,
+    cy: int,
+    inner_radius: int,
+    feather_px: int,
+) -> Image.Image:
+    arr = np.array(cover_rgba.convert("RGBA"), dtype=np.uint8)
+    arr[:, :, 3] = _build_template_alpha(cover_rgba.size, cx, cy, inner_radius, feather_px)
+    return Image.fromarray(arr, mode="RGBA")
 
 
-def _overlay_cache_path(cover_path: Path, center_x: int, center_y: int, radius: int) -> Path:
-    return OVERLAYS_DIR / f"{cover_path.stem}_cx{center_x}_cy{center_y}_r{radius}_{OVERLAY_CACHE_VERSION}.png"
+def _template_cache_path(
+    cover_path: Path,
+    center_x: int,
+    center_y: int,
+    inner_radius: int,
+    feather_px: int,
+) -> Path:
+    return TEMPLATES_DIR / (
+        f"{cover_path.stem}_cx{center_x}_cy{center_y}_"
+        f"ir{inner_radius}_f{feather_px}_{TEMPLATE_CACHE_VERSION}.png"
+    )
 
 
-def _overlay_cache_looks_valid(overlay: Image.Image, cx: int, cy: int, radius: int) -> bool:
-    """Reject stale overlays with obviously broken transparent regions."""
-    if overlay.mode != "RGBA":
+def _template_cache_looks_valid(template: Image.Image, cx: int, cy: int, inner_radius: int) -> bool:
+    if template.mode != "RGBA":
         return False
 
-    alpha = np.array(overlay.split()[-1], dtype=np.uint8)
+    alpha = np.array(template.split()[-1], dtype=np.uint8)
+    if not (0 <= cx < alpha.shape[1] and 0 <= cy < alpha.shape[0]):
+        return False
+
+    if alpha[cy, cx] > 16:
+        return False
+    if alpha[10, 10] < 240:
+        return False
+
     transparent = alpha < 16
     area = int(transparent.sum())
-    if area <= 0:
-        return False
-
-    min_area = int(math.pi * (radius ** 2) * OVERLAY_MIN_AREA_FACTOR)
-    max_area = int(math.pi * (radius ** 2) * OVERLAY_MAX_AREA_FACTOR)
-    if area < min_area or area > max_area:
-        return False
-
-    ys, xs = np.where(transparent)
-    if xs.size == 0:
-        return False
-    cx_t = float(xs.mean())
-    cy_t = float(ys.mean())
-    tol = max(20.0, radius * OVERLAY_CENTER_TOLERANCE_FACTOR)
-    if abs(cx_t - cx) > tol or abs(cy_t - cy) > tol:
+    expected = math.pi * (inner_radius ** 2)
+    if area < expected * 0.75 or area > expected * 1.35:
         return False
     return True
 
 
 def _flatten_generated_alpha(generated_rgba: Image.Image, bg_color: Tuple[int, int, int]) -> Image.Image:
-    """
-    Some providers return transparent PNG cutouts. Flatten onto the sampled
-    background color so the medallion area is always fully painted.
-    """
+    """Flatten transparent provider outputs onto navy background color."""
     img = generated_rgba.convert("RGBA")
     alpha = img.split()[-1]
     mn, mx = alpha.getextrema()
     if mn == 255 and mx == 255:
         return img
+
     bg = Image.new("RGBA", img.size, bg_color + (255,))
     bg.alpha_composite(img)
     return bg
 
 
-def _get_or_create_cover_overlay(
+def _get_or_create_template(
     cover_rgba: Image.Image,
     cover_path: Optional[Path],
     center_x: int,
     center_y: int,
-    radius: int,
-    opening_mask: Optional[Image.Image] = None,
+    inner_radius: int,
+    feather_px: int,
 ) -> Image.Image:
-    if opening_mask is None:
-        opening_mask = _build_opening_mask(cover_rgba.size, center_x, center_y, radius)
-    overlay = _build_cover_overlay(cover_rgba, opening_mask)
+    template = _create_cover_template(cover_rgba, center_x, center_y, inner_radius, feather_px)
 
     if not cover_path:
-        return overlay
+        return template
 
     try:
-        OVERLAYS_DIR.mkdir(parents=True, exist_ok=True)
-        cache_path = _overlay_cache_path(cover_path, center_x, center_y, radius)
+        TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
+        cache_path = _template_cache_path(cover_path, center_x, center_y, inner_radius, feather_px)
+
         if cache_path.exists():
             cached = Image.open(cache_path).convert("RGBA")
-            if cached.size == cover_rgba.size and _overlay_cache_looks_valid(cached, center_x, center_y, radius):
+            if cached.size == cover_rgba.size and _template_cache_looks_valid(cached, center_x, center_y, inner_radius):
                 return cached
-            logger.warning("Overlay cache invalid, regenerating: %s", cache_path)
+            logger.warning("Template cache invalid, regenerating: %s", cache_path)
 
-        overlay.save(cache_path, "PNG", optimize=True)
+        template.save(cache_path, "PNG", optimize=True)
     except Exception as e:  # pragma: no cover
-        logger.warning("Overlay cache write/read failed for %s: %s", cover_path, e)
+        logger.warning("Template cache write/read failed for %s: %s", cover_path, e)
 
-    return overlay
+    return template
 
 
+def _build_circular_illustration_layer(
+    generated_rgba: Image.Image,
+    canvas_size: Tuple[int, int],
+    center_x: int,
+    center_y: int,
+    draw_radius: int,
+    bg_color: Tuple[int, int, int],
+) -> Image.Image:
+    W, H = canvas_size
+    prepared = _flatten_generated_alpha(generated_rgba, bg_color)
+
+    diameter = max(2, draw_radius * 2)
+    crop_center = _find_energy_center(prepared)
+    cropped = _smart_square_crop(prepared, crop_center, diameter)
+
+    raw_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    raw_layer.paste(cropped, (center_x - draw_radius, center_y - draw_radius))
+
+    circle_mask = Image.new("L", (W, H), 0)
+    d = ImageDraw.Draw(circle_mask)
+    d.ellipse(
+        [
+            center_x - draw_radius,
+            center_y - draw_radius,
+            center_x + draw_radius,
+            center_y + draw_radius,
+        ],
+        fill=255,
+    )
+
+    clipped = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    return Image.composite(raw_layer, clipped, circle_mask)
+
+
+def _template_composite_image(
+    cover_rgba: Image.Image,
+    generated_rgba: Image.Image,
+    center_x: int,
+    center_y: int,
+    radius: int,
+    cover_path: Optional[Path] = None,
+) -> Image.Image:
+    """Core in-memory compositor for tests and runtime."""
+    W, H = cover_rgba.size
+
+    inner_radius = _derive_inner_radius(radius)
+    feather_px = max(0, int(DEFAULT_TEMPLATE_FEATHER))
+    draw_radius = inner_radius + max(0, int(DEFAULT_ILLUSTRATION_OVERFILL))
+
+    bg_color = _sample_background_color(cover_rgba, center_x, center_y)
+    result = Image.new("RGBA", (W, H), bg_color + (255,))
+
+    illustration_layer = _build_circular_illustration_layer(
+        generated_rgba=generated_rgba,
+        canvas_size=(W, H),
+        center_x=center_x,
+        center_y=center_y,
+        draw_radius=draw_radius,
+        bg_color=bg_color,
+    )
+    result.alpha_composite(illustration_layer)
+
+    template = _get_or_create_template(
+        cover_rgba=cover_rgba,
+        cover_path=cover_path,
+        center_x=center_x,
+        center_y=center_y,
+        inner_radius=inner_radius,
+        feather_px=feather_px,
+    )
+    result.alpha_composite(template)
+
+    return result
+
+
+# Backwards-compatible alias retained for test/tooling imports.
 def _overlay_composite_image(
     cover_rgba: Image.Image,
     generated_rgba: Image.Image,
@@ -326,41 +363,14 @@ def _overlay_composite_image(
     radius: int,
     cover_path: Optional[Path] = None,
 ) -> Image.Image:
-    """
-    Core in-memory compositor for tests and runtime.
-    """
-    W, H = cover_rgba.size
-
-    # Layer A: background + generated artwork
-    bg_color = _sample_background_color(cover_rgba, center_x, center_y)
-    result = Image.new("RGBA", (W, H), bg_color + (255,))
-
-    # Conservative opening mask (slightly inset from inner frame edge)
-    opening_mask = _build_opening_mask((W, H), center_x, center_y, radius)
-
-    generated_prepped = _flatten_generated_alpha(generated_rgba, bg_color)
-    fill_radius = round(radius * OVERLAY_FILL_RATIO)
-    crop_center = _find_energy_center(generated_prepped)
-    generated_cropped = _smart_square_crop(generated_prepped, crop_center, fill_radius * 2)
-
-    gen_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    gen_layer.paste(generated_cropped, (center_x - fill_radius, center_y - fill_radius))
-
-    # Clip generated layer exactly to opening mask.
-    result = Image.composite(gen_layer, result, opening_mask)
-
-    # Layer B: original cover overlay with transparent opening
-    overlay = _get_or_create_cover_overlay(
+    return _template_composite_image(
         cover_rgba=cover_rgba,
-        cover_path=cover_path,
+        generated_rgba=generated_rgba,
         center_x=center_x,
         center_y=center_y,
         radius=radius,
-        opening_mask=opening_mask,
+        cover_path=cover_path,
     )
-    result.alpha_composite(overlay)
-
-    return result
 
 
 def composite_v3(
@@ -371,9 +381,8 @@ def composite_v3(
     center_y: int = MEDALLION_CENTER_Y,
     radius: int = MEDALLION_RADIUS,
 ) -> Path:
-    """
-    Composite generated art into cover while guaranteeing frame preservation.
-    """
+    """Composite generated art into cover while preserving ornamental frame."""
+    cover_path = Path(cover_path)
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
     out_path = OUTPUTS_DIR / f"{job_id}_composited.jpg"
 
@@ -383,22 +392,25 @@ def composite_v3(
         cover = cover.resize((COVER_WIDTH, COVER_HEIGHT), Image.LANCZOS)
 
     generated = Image.open(BytesIO(generated_image_bytes)).convert("RGBA")
-    result = _overlay_composite_image(
-        cover,
-        generated,
-        center_x,
-        center_y,
-        radius,
+    result = _template_composite_image(
+        cover_rgba=cover,
+        generated_rgba=generated,
+        center_x=center_x,
+        center_y=center_y,
+        radius=radius,
         cover_path=cover_path,
     )
 
     result.convert("RGB").save(out_path, "JPEG", quality=95, dpi=(COVER_DPI, COVER_DPI))
+
     logger.info(
-        "Compositor v7 saved: %s (%d bytes, safety_px=%.1f, cache=%s)",
+        "Compositor v8 saved: %s (%d bytes, inner_r=%d, feather=%d, overfill=%d, cache=%s)",
         out_path,
         out_path.stat().st_size,
-        OPENING_MASK_SAFETY_PX,
-        OVERLAY_CACHE_VERSION,
+        _derive_inner_radius(radius),
+        DEFAULT_TEMPLATE_FEATHER,
+        DEFAULT_ILLUSTRATION_OVERFILL,
+        TEMPLATE_CACHE_VERSION,
     )
     return out_path
 

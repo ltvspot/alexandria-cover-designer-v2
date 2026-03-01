@@ -11,7 +11,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.config import BASE_DIR, COVERS_DIR, DATA_DIR, OUTPUTS_DIR, THUMBNAILS_DIR, DEBUG
+from app.config import BASE_DIR, COVERS_DIR, DATA_DIR, OUTPUTS_DIR, THUMBNAILS_DIR, OVERLAYS_DIR, TEMPLATES_DIR, DEBUG
 from app.database import init_db
 from app.routes.pages import router as pages_router
 from app.routes.api import router as api_router
@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 
 # ─── Ensure data directories exist ──────────────────────────────────────────
-for _d in (DATA_DIR, COVERS_DIR, OUTPUTS_DIR, THUMBNAILS_DIR):
+for _d in (DATA_DIR, COVERS_DIR, OUTPUTS_DIR, THUMBNAILS_DIR, OVERLAYS_DIR, TEMPLATES_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
 
